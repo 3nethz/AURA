@@ -118,7 +118,7 @@ class JavaMigrationAgentService:
             app = build_workflow(self.llm, tools, output_path, pipeline_logger)
 
             # Create prompt for the agent WITH FILE CONTENT
-            prompt = self._create_prompt(pom_diff, "", file_contents, "", migration_plan)
+            prompt = self._create_prompt(pom_diff, file_contents, migration_plan)
             pipeline_logger.log_prompt(prompt, file_contents)
             
             # Run agent with reduced recursion limit to save tokens
