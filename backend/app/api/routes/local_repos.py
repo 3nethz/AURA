@@ -351,7 +351,7 @@ async def process_repository(
         #         logger.warning(f"[PlanningAgent] Planning agent error: {e}, continuing without plan")
 
         # ========================================
-        # RECIPE-BASED AGENT (tries first)
+        # RECIPE-BASED AGENT
         # ========================================
         recipe_result = None
         if initial_errors:  # Check the local variable, not request.initial_errors!

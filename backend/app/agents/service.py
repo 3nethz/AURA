@@ -139,7 +139,7 @@ class JavaMigrationAgentService:
                 {"messages": initial_messages, "proposed_diff": None},
                 config={
                     "run_name": commit_hash,
-                    "recursion_limit": 5,  # Reduced from 30 to save API tokens
+                    "recursion_limit": 10,
                     "configurable": {"thread_id": commit_hash}
                 }
             )

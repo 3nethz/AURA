@@ -34,11 +34,11 @@ The dependency version upgrades in pom.xml are intentional and must be kept.
 You MUST adapt the Java source code to work with the NEW dependency versions.
 Reverting dependency versions is NOT an acceptable solution.
 
-However, you CAN MODIFY pom.xml to ADD NEW dependencies if needed to fix compilation issues.
+You CAN MODIFY pom.xml to ADD NEW dependencies if needed to fix compilation issues.
 For example, you may need to add missing transitive dependencies that were removed in version upgrades.
 When adding dependencies:
-- Add complete <dependency> blocks with <groupId>, <artifactId>, and <version> tags
 - Place new dependencies in the <dependencies> section
+- Add complete <dependency> blocks with <groupId>, <artifactId>, and <version> tags
 - Do NOT modify or remove existing dependency versions
 - Only ADD new dependencies, never change or remove existing ones
 
