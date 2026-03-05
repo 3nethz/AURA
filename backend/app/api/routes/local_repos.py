@@ -332,7 +332,8 @@ async def process_repository(
         if initial_errors:
             logger.info(f"[PlanningAgent] Generating migration plan for {repo_name}")
             try:
-                planning_service = PlanningAgentService()
+                # Use GPT-OSS-120 for planning agent, Llama for others
+                planning_service = PlanningAgentService(provider="gpt-oss-120")
                 plan_result = planning_service.create_plan(
                     repo_path=str(repo_path),
                     commit_hash=commit_hash,

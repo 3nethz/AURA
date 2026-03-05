@@ -37,11 +37,12 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     LLM_PROVIDER: str = "groq"  # Options: "groq" or "gemini"
-    
+
     # Groq Configuration
     GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"  # Default for Recipe/LLM agents
+    GROQ_PLANNING_MODEL: str = "openai/gpt-oss-120b"  # Model for Planning agent
+
     # Gemini Configuration
     GOOGLE_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-2.5-flash-lite"

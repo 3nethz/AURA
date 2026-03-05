@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
+from groq import Groq
 from app.core.config import settings
 from app.utils.logger import logger
 
@@ -54,7 +55,7 @@ class PlanningAgentService:
         """Initialize with configurable LLM provider.
 
         Args:
-            provider: "groq" or "gemini" (defaults to settings.LLM_PROVIDER)
+            provider: "groq", "gpt-oss-120" or "gemini" (defaults to settings.LLM_PROVIDER)
             api_key: API key (defaults to appropriate key from settings)
             model: Model name (defaults to appropriate model from settings)
         """
@@ -71,6 +72,13 @@ class PlanningAgentService:
                 timeout=240,
             )
             self.provider = "gemini"
+        elif provider == "gpt-oss-120":
+            # Use native Groq client for GPT-OSS-120B with reasoning
+            api_key = api_key or settings.GROQ_API_KEY
+            self.client = Groq(api_key=api_key)
+            self.model = model or settings.GROQ_PLANNING_MODEL
+            self.provider = "gpt-oss-120"
+            self.llm = None  # Not using LangChain for this provider
         else:
             api_key = api_key or settings.GROQ_API_KEY
             model = model or settings.GROQ_MODEL
@@ -138,8 +146,22 @@ class PlanningAgentService:
                 {"role": "user", "content": prompt},
             ]
 
-            response = self.llm.invoke(messages)
-            plan_text = response.content.strip() if hasattr(response, "content") else str(response)
+            # Use native Groq client for GPT-OSS-120, otherwise use LangChain
+            if self.provider == "gpt-oss-120":
+                # Use native Groq client with reasoning support
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=1,
+                    max_completion_tokens=8192,
+                    top_p=1,
+                    reasoning_effort="medium",
+                    stream=False,  # Don't stream for synchronous response
+                )
+                plan_text = completion.choices[0].message.content.strip()
+            else:
+                response = self.llm.invoke(messages)
+                plan_text = response.content.strip() if hasattr(response, "content") else str(response)
 
             logger.info(f"[PlanningAgent] Plan generated ({len(plan_text)} chars)")
 
