@@ -350,7 +350,7 @@ When you have a diff ready to test, provide it ONLY as a markdown code block sta
         print("[AGENT] Routing to compile agent")
         return "compile_agent"
     
-    def should_improve_non_test_diff(state: MessagesState) -> Literal["agent", END]:
+    def should_improve_non_test_diff(state: MessagesState) -> Literal["agent"] | str:
         """Check if compilation succeeded - copy from langchain-agent.py line 800"""
         messages = state["messages"]
         last_message = messages[-1]
