@@ -1,80 +1,507 @@
 """
-Local repositories API routes
-Endpoints for managing and processing local Java repositories
+Local Repositories API Routes.
+
+This module provides FastAPI endpoints for managing and processing local Java
+(Maven) repositories. It includes functionality for cloning repositories,
+listing available local workspaces, extracting metadata, and executing a full
+migration pipeline using AI agents (Planning, Recipe, and LLM-based agents).
+
+Typical usage involves cloning a repository via `/clone` and then triggering
+the migration pipeline via `/process/{repo_name}`.
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+import subprocess
+import traceback
 from pathlib import Path
+from typing import Any, Final, NamedTuple
 
-from app.services.local_repository_service import local_repo_service
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from pydantic import BaseModel, Field
+
+from app.agents.planning_service import PlanningAgentService
+from app.agents.service import JavaMigrationAgentService
 from app.core.config import settings
+from app.masterthesis.agent.JapiCmpAgent import JapiCmpAgent
+from app.masterthesis.agent.MavenReproducerAgent import MavenReproducerAgent
+from app.recipe_agent.recipe_orchestrator import RecipeOrchestrator
+from app.services.local_repository_service import local_repo_service
 from app.utils.logger import logger
 from app.utils.pipeline_logger import PipelineLogger
 
-# Import the agent services
-from app.agents.service import JavaMigrationAgentService
-from app.agents.planning_service import PlanningAgentService
+__all__ = [
+    "router",
+    "CloneRepositoryRequest",
+    "ProcessRepositoryRequest",
+    "RepositoryResponse",
+    "list_local_repositories",
+    "clone_repository",
+    "process_repository",
+    "get_repository_info",
+]
 
+# --- Constants ---
+LOCAL_MODE_ERROR: Final[str] = "This endpoint is only available in LOCAL_MODE"
+DEFAULT_COMMIT: Final[str] = "local"
+PLANNING_PROVIDER: Final[str] = "gpt-oss-120"
+MAVEN_TIMEOUT_SEC: Final[int] = 300
+RECIPE_AGENT_METHOD: Final[str] = "recipe_agent"
+LLM_AGENT_METHOD: Final[str] = "llm_agent"
 
 router = APIRouter()
 
 
+# --- Models ---
 class CloneRepositoryRequest(BaseModel):
+    """
+    Request payload for cloning a remote repository.
+
+    Attributes:
+        git_url: The GitHub repository URL.
+        target_name: An optional custom directory name for the clone.
+    """
     git_url: str
-    target_name: Optional[str] = None
+    target_name: str | None = None
 
 
 class ProcessRepositoryRequest(BaseModel):
+    """
+    Request payload for processing a local Java repository.
+
+    Attributes:
+        repo_name: The name of the local repository directory.
+        pom_diff: Optional specific pom.xml changes to analyze.
+        initial_errors: Optional initial Maven compilation errors.
+    """
     repo_name: str
-    pom_diff: Optional[str] = ""  # Optional: provide specific pom.xml changes to analyze
-    initial_errors: Optional[str] = ""  # Optional: provide initial Maven errors
+    pom_diff: str | None = ""
+    initial_errors: str | None = ""
 
 
 class RepositoryResponse(BaseModel):
+    """
+    Response model detailing local repository information.
+
+    Attributes:
+        name: The name of the repository directory.
+        path: Absolute or relative path to the repository.
+        has_pom: True if a pom.xml exists at the root.
+        is_git: True if it is a valid Git repository.
+        git_info: Additional Git metadata, if available.
+    """
     name: str
     path: str
     has_pom: bool
     is_git: bool
-    git_info: Optional[Dict[str, Any]] = None
+    git_info: dict[str, Any] | None = None
 
 
-@router.get("/list", response_model=List[RepositoryResponse])
-async def list_local_repositories():
+class CompilationResult(NamedTuple):
+    """Internal struct representing the result of a Maven compilation check."""
+    needs_fixes: bool
+    errors: str
+
+
+# --- Helper Functions ---
+def _require_local_mode() -> None:
     """
-    List all local Java (Maven) repositories in the workspace
-    Only includes directories with pom.xml files
+    Enforces that the application is running in LOCAL_MODE.
+
+    Raises:
+        HTTPException: If `settings.LOCAL_MODE` is False (HTTP 400).
     """
     if not settings.LOCAL_MODE:
         raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only available in LOCAL_MODE"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=LOCAL_MODE_ERROR,
         )
+
+
+def _run_git_command(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """
+    Executes a Git command within a specific directory.
+
+    Args:
+        cwd: The working directory for the Git command.
+        args: A list of string arguments for the Git CLI.
+
+    Returns:
+        The CompletedProcess instance containing stdout, stderr, and returncode.
+    """
+    cmd = ["git", *args]
+    logger.info(f"[GIT] Command: {' '.join(cmd)}")
+    result = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True, check=False
+    )
+    logger.info(f"[GIT] Return code: {result.returncode}")
+    if result.stdout:
+        logger.info(f"[GIT] Output length: {len(result.stdout)} chars")
+    if result.stderr:
+        logger.info(f"[GIT] Stderr: {result.stderr}")
+    return result
+
+
+def _detect_pom_diff(repo_path: Path) -> str:
+    """
+    Attempts to detect recent changes to any pom.xml files via Git history.
+
+    Args:
+        repo_path: The root path of the local repository.
+
+    Returns:
+        A string containing the Git diff of pom.xml changes, or an empty string
+        if no changes were detected or an error occurred.
+    """
+    try:
+        logger.info(f"[GIT] Searching for pom.xml files in {repo_path}")
+        find_result = _run_git_command(repo_path, ["ls-files", "*pom.xml"])
+        pom_files = [f.strip() for f in find_result.stdout.split("\n") if f.strip()]
+
+        if not pom_files:
+            logger.warning("[GIT] No pom.xml files found in git repo")
+            return ""
+
+        logger.info(f"[GIT] Found {len(pom_files)} pom.xml file(s): {pom_files}")
+
+        # Strategy 1: diff against HEAD~1
+        res = _run_git_command(repo_path, ["diff", "HEAD~1", "HEAD", "--", *pom_files])
+        if res.returncode == 0 and res.stdout:
+            logger.info("[GIT] ✓ Detected pom.xml changes from git diff (HEAD~1 vs HEAD)")
+            return res.stdout
+
+        # Strategy 2: uncommitted changes against HEAD
+        logger.info("[GIT] ✗ No diff between HEAD~1 and HEAD, trying uncommitted changes...")
+        res = _run_git_command(repo_path, ["diff", "HEAD", "--", *pom_files])
+        if res.returncode == 0 and res.stdout:
+            logger.info("[GIT] ✓ Detected uncommitted pom.xml changes")
+            return res.stdout
+
+        # Strategy 3: check log for last modification
+        logger.info("[GIT] ✗ No changes detected, checking git log for pom.xml modifications...")
+        res = _run_git_command(repo_path, ["log", "--pretty=format:%H", "-n", "1", "--", *pom_files])
+        if res.returncode == 0 and res.stdout:
+            last_commit = res.stdout.strip()
+            logger.info(f"[GIT] ✓ Found pom.xml last modified in commit: {last_commit[:7]}")
+            
+            res_show = _run_git_command(
+                repo_path, ["show", f"{last_commit}^..{last_commit}", "--", *pom_files]
+            )
+            if res_show.returncode == 0 and res_show.stdout:
+                logger.info("[GIT] ✓ Got pom.xml changes from history")
+                return res_show.stdout
+
+        logger.warning("[GIT] ✗ Could not find any pom.xml changes")
+        return ""
+
+    except subprocess.SubprocessError as e:
+        logger.warning(f"[GIT] Subprocess error during pom.xml detection: {e}")
+        return ""
+    except Exception as e:
+        logger.warning(f"[GIT] Exception during pom.xml detection: {e}\n{traceback.format_exc()}")
+        return ""
+
+
+def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> CompilationResult:
+    """
+    Compiles the Maven project inside a Docker container to retrieve baseline errors.
+
+    Args:
+        repo_path: Path to the local repository.
+        repo_name: The name of the repository.
+
+    Returns:
+        CompilationResult containing boolean `needs_fixes` and the errors text.
+
+    Raises:
+        HTTPException: If the Docker compilation crashes.
+    """
+    logger.info(f"Compiling {repo_name} in Docker to get initial errors...")
+    try:
+        maven_agent = MavenReproducerAgent(repo_path)
+        with maven_agent.start_container():
+            (compile_ok, _test_ok), error_text, _ = maven_agent.compile_maven(
+                diffs=[], run_tests=False, timeout=MAVEN_TIMEOUT_SEC
+            )
+
+        if not compile_ok:
+            logger.info(f"Compilation failed - detected errors ({len(error_text)} chars)")
+            return CompilationResult(needs_fixes=True, errors=error_text)
+
+        logger.info("Project compiles successfully - no errors to fix")
+        return CompilationResult(needs_fixes=False, errors="")
+
+    except Exception as e:
+        logger.error(f"Error during initial compilation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to compile project: {e}"
+        )
+
+
+def _generate_api_changes(
+    repo_path: Path,
+    pom_diff: str,
+    initial_errors: str,
+    pipeline_logger: PipelineLogger
+) -> str:
+    """
+    Generates API changes mapping by running the JapiCmp tool.
+
+    Args:
+        repo_path: Path to the local repository.
+        pom_diff: The detected diff in pom.xml files.
+        initial_errors: The compilation errors to filter relevant API changes.
+        pipeline_logger: Active logger to record process metrics.
+
+    Returns:
+        Filtered API changes text. Empty string if tool fails or no changes found.
+    """
+    if not pom_diff:
+        return ""
+
+    try:
+        api_change_agent = JapiCmpAgent(pipeline_logger=pipeline_logger)
+        api_result = api_change_agent.generate_api_changes_with_raw(
+            repo_path=str(repo_path),
+            pom_diff=pom_diff,
+            compilation_errors=initial_errors,
+        )
+
+        raw_changes = api_result.get("raw", "")
+        if raw_changes:
+            logger.info(f"[REVAPI] Full raw API changes ({len(raw_changes)} chars):")
+            logger.info(raw_changes[:500])
+
+        filtered_changes = api_result.get("filtered", "")
+        if filtered_changes:
+            logger.info(f"Generated API changes ({len(filtered_changes)} chars)")
+        else:
+            logger.info("No API changes generated (tool not configured or no changes found)")
+        
+        return filtered_changes
+
+    except Exception as e:
+        logger.warning(f"API change analysis failed: {e}")
+        return ""
+
+
+def _create_migration_plan(
+    repo_path: Path,
+    commit_hash: str,
+    repo_slug: str,
+    pom_diff: str,
+    initial_errors: str,
+    api_changes_text: str,
+    pipeline_logger: PipelineLogger,
+) -> str:
+    """
+    Uses the Planning Agent to generate a migration strategy.
+
+    Args:
+        repo_path: Path to the repository.
+        commit_hash: Current Git commit SHA.
+        repo_slug: Repository directory name.
+        pom_diff: Diff of the pom.xml file.
+        initial_errors: Output of initial failed compilation.
+        api_changes_text: Extracted JapiCmp API diffs.
+        pipeline_logger: Pipeline logger to store the plan text file.
+
+    Returns:
+        The generated migration plan string, or an empty string on failure.
+    """
+    if not initial_errors:
+        return ""
+
+    logger.info(f"[PlanningAgent] Generating migration plan for {repo_slug}")
+    try:
+        planning_service = PlanningAgentService(provider=PLANNING_PROVIDER)
+        plan_result = planning_service.create_plan(
+            repo_path=str(repo_path),
+            commit_hash=commit_hash,
+            repo_slug=repo_slug,
+            pom_diff=pom_diff,
+            initial_errors=initial_errors,
+            api_changes_text=api_changes_text,
+            pipeline_logger=pipeline_logger,
+        )
+        
+        if plan_result and plan_result.get("success"):
+            migration_plan = plan_result.get("plan", "")
+            logger.info(f"[PlanningAgent] Migration plan ready ({len(migration_plan)} chars)")
+
+            pipeline_logger.log_stage("planning_agent_output", {
+                "migration_plan": migration_plan,
+                "plan_length": len(migration_plan),
+            })
+
+            plan_text_path = pipeline_logger.log_dir / "01_migration_plan.txt"
+            plan_text_path.write_text(migration_plan, encoding="utf-8")
+            logger.info(f"[PlanningAgent] Migration plan saved to {plan_text_path}")
+            return migration_plan
+        
+        logger.warning(
+            f"[PlanningAgent] Planning failed: {plan_result.get('error')}, continuing without plan"
+        )
+    except Exception as e:
+        logger.warning(f"[PlanningAgent] Planning agent error: {e}, continuing without plan")
+    
+    return ""
+
+
+def _apply_recipe_agent(
+    repo_path: Path,
+    pom_diff: str,
+    migration_plan: str,
+    commit_hash: str,
+    repo_name: str,
+    pipeline_logger: PipelineLogger,
+) -> dict[str, Any] | None:
+    """
+    Attempts to fix the code using deterministic recipes via RecipeOrchestrator.
+
+    Args:
+        repo_path: Path to the repository.
+        pom_diff: Contextual pom diff.
+        migration_plan: Guided plan from the Planning Agent.
+        commit_hash: Current commit SHA.
+        repo_name: Repository directory name.
+        pipeline_logger: The active pipeline logger.
+
+    Returns:
+        A dictionary containing the successful recipe result, or None if failed/skipped.
+    """
+    logger.info(f"[RecipeAgent] Attempting recipe-based fix for {repo_name}")
+    
+    pipeline_logger.log_stage("recipe_agent_input", {
+        "pom_diff": pom_diff,
+        "migration_plan": migration_plan,
+        "commit_sha": commit_hash,
+        "repo_slug": repo_name,
+    })
+    
+    recipe_input_dir = pipeline_logger.log_dir / "recipe_agent_input"
+    recipe_input_dir.mkdir(exist_ok=True)
+    if pom_diff:
+        (recipe_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
+    if migration_plan:
+        (recipe_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
+        
+    logger.info(f"[RecipeAgent] Input logged at {recipe_input_dir}")
     
     try:
-        repositories = local_repo_service.list_local_repositories()
-        return repositories
+        orchestrator = RecipeOrchestrator(
+            settings.GROQ_API_KEY, pipeline_logger=pipeline_logger
+        )
+        recipe_result = orchestrator.process_breaking_change(
+            repo_path=str(repo_path),
+            pom_diff=pom_diff,
+            migration_plan=migration_plan,
+            commit_sha=commit_hash,
+            repo_slug=repo_name,
+        )
+        
+        if recipe_result and recipe_result.get("success"):
+            logger.info(f"[RecipeAgent] Successfully fixed using recipes for {repo_name}")
+            return recipe_result
+            
+        logger.info("[RecipeAgent] Recipe fix not applicable, falling back to LLM agent")
+    except Exception as e:
+        logger.warning(f"[RecipeAgent] Recipe agent failed: {e}, falling back to LLM agent")
+    
+    return None
+
+
+def _apply_llm_agent(
+    repo_path: Path,
+    pom_diff: str,
+    migration_plan: str,
+    commit_hash: str,
+    repo_name: str,
+    pipeline_logger: PipelineLogger,
+) -> dict[str, Any]:
+    """
+    Applies the generative LLM Agent as the primary fix or fallback mechanism.
+
+    Args:
+        repo_path: Path to the repository.
+        pom_diff: Contextual pom diff.
+        migration_plan: Guided plan from the Planning Agent.
+        commit_hash: Current commit SHA.
+        repo_name: Repository directory name.
+        pipeline_logger: The active pipeline logger.
+
+    Returns:
+        A dictionary containing the agent's processing result.
+    """
+    agent_service = JavaMigrationAgentService()
+
+    pipeline_logger.log_stage("llm_agent_input", {
+        "pom_diff": pom_diff,
+        "migration_plan": migration_plan,
+        "commit_hash": commit_hash,
+        "repo_slug": repo_name,
+    })
+    
+    llm_input_dir = pipeline_logger.log_dir / "llm_agent_input"
+    llm_input_dir.mkdir(exist_ok=True)
+    if pom_diff:
+        (llm_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
+    if migration_plan:
+        (llm_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
+        
+    logger.info(f"[LLM Agent] Input logged at {llm_input_dir}")
+    logger.info(f"Starting agent processing for {repo_name}")
+
+    return agent_service.process_repository(
+        repo_path=str(repo_path),
+        commit_hash=commit_hash,
+        repo_slug=repo_name,
+        pom_diff=pom_diff,
+        migration_plan=migration_plan,
+        pipeline_logger=pipeline_logger,
+    )
+
+
+# --- API Routes ---
+@router.get("/list", response_model=list[RepositoryResponse])
+async def list_local_repositories() -> list[dict[str, Any]]:
+    """
+    List all local Java (Maven) repositories in the workspace.
+    
+    Only includes directories with `pom.xml` files.
+
+    Returns:
+        A list of repository details matching the RepositoryResponse model.
+
+    Raises:
+        HTTPException: If the server is not in LOCAL_MODE (400) or fails to read dirs (500).
+    """
+    _require_local_mode()
+    
+    try:
+        return local_repo_service.list_local_repositories()
     except Exception as e:
         logger.error(f"Error listing repositories: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 @router.post("/clone")
-async def clone_repository(request: CloneRepositoryRequest):
+async def clone_repository(request: CloneRepositoryRequest) -> dict[str, Any]:
     """
-    Clone a repository from GitHub to the local workspace
-    
-    Request body:
-    - git_url: GitHub repository URL (e.g., https://github.com/owner/repo.git)
-    - target_name: Optional custom directory name
+    Clone a repository from GitHub to the local workspace.
+
+    Args:
+        request: The payload containing the git_url and optional target_name.
+
+    Returns:
+        A dictionary containing success status, message, path, and pom metadata.
+
+    Raises:
+        HTTPException: If not in LOCAL_MODE (400) or cloning fails (500).
     """
-    if not settings.LOCAL_MODE:
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only available in LOCAL_MODE"
-        )
+    _require_local_mode()
     
     try:
         repo_path = local_repo_service.clone_repository(
@@ -82,7 +509,6 @@ async def clone_repository(request: CloneRepositoryRequest):
             target_name=request.target_name
         )
         
-        # Check if it's a Maven project
         has_pom = (repo_path / "pom.xml").exists()
         
         return {
@@ -94,7 +520,10 @@ async def clone_repository(request: CloneRepositoryRequest):
         }
     except Exception as e:
         logger.error(f"Error cloning repository: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=str(e)
+        )
 
 
 @router.post("/process/{repo_name}")
@@ -102,191 +531,60 @@ async def process_repository(
     repo_name: str,
     request: ProcessRepositoryRequest,
     background_tasks: BackgroundTasks
-):
+) -> dict[str, Any]:
     """
-    Process a local repository with the Java migration agent
-    
-    Path parameter:
-    - repo_name: Name of the repository directory
-    
-    Request body:
-    - pom_diff: Optional pom.xml changes to analyze
-    - initial_errors: Optional Maven compilation errors
+    Process a local repository utilizing the Java migration agent pipeline.
+
+    Args:
+        repo_name: The target repository directory name in the workspace.
+        request: Process parameters (pom modifications, error logs).
+        background_tasks: FastAPI background tasks dependency.
+
+    Returns:
+        A dictionary containing the success flag, the applied method, and detailed
+        execution results.
+
+    Raises:
+        HTTPException: 400 if not LOCAL_MODE or missing pom.xml.
+        HTTPException: 404 if the repo is not found.
+        HTTPException: 500 if the process critically fails.
     """
-    if not settings.LOCAL_MODE:
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only available in LOCAL_MODE"
-        )
+    _require_local_mode()
     
-    # Validate repository exists
     repo_path = local_repo_service.get_repository_path(repo_name)
     if not repo_path:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Repository '{repo_name}' not found in workspace"
         )
     
-    # Check if it has pom.xml
     if not local_repo_service.check_pom_exists(repo_name):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Repository '{repo_name}' does not contain pom.xml"
         )
     
-    # Get git info
     git_info = local_repo_service._get_git_info(repo_path)
-    commit_hash = git_info.get("commit", "local") if git_info else "local"
+    commit_hash = git_info.get("commit", DEFAULT_COMMIT) if git_info else DEFAULT_COMMIT
     
-    # If no pom_diff provided, try to detect recent changes
-    pom_diff = request.pom_diff
-    if not pom_diff:
-        # Try to get recent git diff for pom.xml (including nested ones)
-        try:
-            import subprocess
-            
-            # First, find all pom.xml files in the repo
-            logger.info(f"[GIT] Searching for pom.xml files in {repo_path}")
-            find_result = subprocess.run(
-                ["git", "ls-files", "*pom.xml"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True
-            )
-            
-            logger.info(f"[GIT] Command: git ls-files *pom.xml")
-            logger.info(f"[GIT] Return code: {find_result.returncode}")
-            if find_result.stderr:
-                logger.info(f"[GIT] Stderr: {find_result.stderr}")
-            
-            pom_files = [f.strip() for f in find_result.stdout.split('\n') if f.strip()]
-            logger.info(f"[GIT] Found {len(pom_files)} pom.xml file(s): {pom_files}")
-            
-            if not pom_files:
-                logger.warning(f"[GIT] No pom.xml files found in git repo")
-            else:
-                # Try HEAD~1 first (most recent change)
-                cmd = ["git", "diff", "HEAD~1", "HEAD", "--"] + pom_files
-                logger.info(f"[GIT] Command: {' '.join(cmd)}")
-                result = subprocess.run(
-                    cmd,
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True
-                )
-                
-                logger.info(f"[GIT] Return code: {result.returncode}")
-                logger.info(f"[GIT] Output length: {len(result.stdout)} chars")
-                if result.stderr:
-                    logger.info(f"[GIT] Stderr: {result.stderr}")
-                
-                if result.returncode == 0 and result.stdout:
-                    pom_diff = result.stdout
-                    logger.info(f"[GIT] ✓ Detected pom.xml changes from git diff (HEAD~1 vs HEAD)")
-                else:
-                    # Try without HEAD~1 (in case only one commit exists)
-                    logger.info(f"[GIT] ✗ No diff between HEAD~1 and HEAD, trying uncommitted changes...")
-                    cmd = ["git", "diff", "HEAD", "--"] + pom_files
-                    logger.info(f"[GIT] Command: {' '.join(cmd)}")
-                    result = subprocess.run(
-                        cmd,
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True
-                    )
-                    
-                    logger.info(f"[GIT] Return code: {result.returncode}")
-                    logger.info(f"[GIT] Output length: {len(result.stdout)} chars")
-                    if result.stderr:
-                        logger.info(f"[GIT] Stderr: {result.stderr}")
-                    
-                    if result.returncode == 0 and result.stdout:
-                        pom_diff = result.stdout
-                        logger.info(f"[GIT] ✓ Detected uncommitted pom.xml changes")
-                    else:
-                        # Try to get diffs of last changes to any pom.xml
-                        logger.info(f"[GIT] ✗ No changes detected, checking git log for pom.xml modifications...")
-                        cmd = ["git", "log", "--pretty=format:%H", "-n", "1", "--"] + pom_files
-                        logger.info(f"[GIT] Command: {' '.join(cmd)}")
-                        result = subprocess.run(
-                            cmd,
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True
-                        )
-                        
-                        logger.info(f"[GIT] Return code: {result.returncode}")
-                        logger.info(f"[GIT] Output length: {len(result.stdout)} chars")
-                        if result.stderr:
-                            logger.info(f"[GIT] Stderr: {result.stderr}")
-                        
-                        if result.returncode == 0 and result.stdout:
-                            last_commit = result.stdout.strip()
-                            logger.info(f"[GIT] ✓ Found pom.xml last modified in commit: {last_commit[:7]}")
-                            # Get diff of last change to any pom.xml
-                            cmd = ["git", "show", f"{last_commit}^..{last_commit}", "--"] + pom_files
-                            logger.info(f"[GIT] Command: {' '.join(cmd)}")
-                            result = subprocess.run(
-                                cmd,
-                                cwd=repo_path,
-                                capture_output=True,
-                                text=True
-                            )
-                            
-                            logger.info(f"[GIT] Return code: {result.returncode}")
-                            logger.info(f"[GIT] Output length: {len(result.stdout)} chars")
-                            if result.stderr:
-                                logger.info(f"[GIT] Stderr: {result.stderr}")
-                            
-                            if result.returncode == 0 and result.stdout:
-                                pom_diff = result.stdout
-                                logger.info(f"[GIT] ✓ Got pom.xml changes from history")
-                        
-                        if not pom_diff:
-                            logger.warning(f"[GIT] ✗ Could not find any pom.xml changes")
-                            pom_diff = ""
-        except Exception as e:
-            logger.warning(f"[GIT] Exception during pom.xml detection: {e}")
-            import traceback
-            logger.warning(traceback.format_exc())
-            pom_diff = ""
+    # 1. Diff Detection
+    pom_diff = request.pom_diff or _detect_pom_diff(repo_path)
+    logger.info(f"[GIT] Final result: pom_diff length = {len(pom_diff)} chars")
     
-    logger.info(f"[GIT] Final result: pom_diff length = {len(pom_diff) if pom_diff else 0} chars")
-    
-    # Step 1: Compile in Docker to get initial errors
+    # 2. Baseline Docker Compilation
     initial_errors = request.initial_errors
     if not initial_errors:
-        logger.info(f"Compiling {repo_name} in Docker to get initial errors...")
-        try:
-            from app.masterthesis.agent.MavenReproducerAgent import MavenReproducerAgent
-            from pathlib import Path
-            
-            maven_agent = MavenReproducerAgent(Path(repo_path))
-            with maven_agent.start_container():
-                (compile_ok, test_ok), error_text, _ = maven_agent.compile_maven(
-                    diffs=[],
-                    run_tests=False,
-                    timeout=300
-                )
-            
-            if not compile_ok:
-                initial_errors = error_text
-                logger.info(f"Compilation failed - detected errors ({len(error_text)} chars)")
-            else:
-                logger.info("Project compiles successfully - no errors to fix")
-                return {
-                    "success": True,
-                    "repository": repo_name,
-                    "message": "Project compiles successfully, no fixes needed"
-                }
-        except Exception as e:
-            logger.error(f"Error during initial compilation: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to compile project: {str(e)}")
+        comp_result = _get_initial_errors_from_docker(repo_path, repo_name)
+        if not comp_result.needs_fixes:
+            return {
+                "success": True,
+                "repository": repo_name,
+                "message": "Project compiles successfully, no fixes needed"
+            }
+        initial_errors = comp_result.errors
 
-    # Initialize pipeline logger early so it can be used by API change analysis
+    # 3. Pipeline Initialization
     pipeline_logger = PipelineLogger(repo_name)
-    
-    # Log initial input data
     pipeline_logger.log_input(
         pom_diff=pom_diff,
         initial_errors=initial_errors,
@@ -294,201 +592,105 @@ async def process_repository(
         commit_hash=commit_hash
     )
 
-    # Step 1.5: Generate API changes from dependency diff (REVAPI/JApiCmp)
-    api_changes_text = ""
-    api_result = {"raw": "", "filtered": "", "tool_used": "none"}  # Initialize with defaults
-    
-    if pom_diff:
-        try:
-            from app.masterthesis.agent.JapiCmpAgent import JapiCmpAgent
-
-            api_change_agent = JapiCmpAgent(pipeline_logger=pipeline_logger)
-            api_result = api_change_agent.generate_api_changes_with_raw(
-                repo_path=str(repo_path),
-                pom_diff=pom_diff,
-                compilation_errors=initial_errors  # Filter API changes to only relevant ones
-            )
-            
-            # Log full/raw API changes result
-            if api_result.get("raw"):
-                logger.info(f"[REVAPI] Full raw API changes ({len(api_result['raw'])} chars):")
-                logger.info(api_result["raw"][:500])  # Log first 500 chars to console
-            
-            # Use filtered version for next stage (LLM processing)
-            api_changes_text = api_result.get("filtered", "")
-            
-            if api_changes_text:
-                logger.info(f"Generated API changes ({len(api_changes_text)} chars)")
-            else:
-                logger.info("No API changes generated (tool not configured or no changes found)")
-        except Exception as e:
-            logger.warning(f"API change analysis failed: {e}")
-    
+    # 4. Agent Execution Flow
     try:
-        # ========================================
-        # PLANNING AGENT (runs first, creates migration plan)
-        # ========================================
-        migration_plan = ""
-        if initial_errors:
-            logger.info(f"[PlanningAgent] Generating migration plan for {repo_name}")
-            try:
-                # Use GPT-OSS-120 for planning agent, Llama for others
-                planning_service = PlanningAgentService(provider="gpt-oss-120")
-                plan_result = planning_service.create_plan(
-                    repo_path=str(repo_path),
-                    commit_hash=commit_hash,
-                    repo_slug=repo_name,
-                    pom_diff=pom_diff,
-                    initial_errors=initial_errors,
-                    api_changes_text=api_changes_text,
-                    pipeline_logger=pipeline_logger,
-                )
-                if plan_result and plan_result.get("success"):
-                    migration_plan = plan_result["plan"]
-                    logger.info(f"[PlanningAgent] Migration plan ready ({len(migration_plan)} chars)")
-                    
-                    # Log the migration plan explicitly
-                    pipeline_logger.log_stage("planning_agent_output", {
-                        "migration_plan": migration_plan,
-                        "plan_length": len(migration_plan),
-                    })
-                    
-                    # Save migration plan as text file for easy reading
-                    plan_text_path = pipeline_logger.log_dir / "01_migration_plan.txt"
-                    plan_text_path.write_text(migration_plan, encoding="utf-8")
-                    logger.info(f"[PlanningAgent] Migration plan saved to {plan_text_path}")
-                else:
-                    logger.warning(f"[PlanningAgent] Planning failed: {plan_result.get('error')}, continuing without plan")
-            except Exception as e:
-                logger.warning(f"[PlanningAgent] Planning agent error: {e}, continuing without plan")
+        # 4a. JApiCmp / API Changes
+        api_changes_text = _generate_api_changes(
+            repo_path=repo_path,
+            pom_diff=pom_diff,
+            initial_errors=initial_errors,
+            pipeline_logger=pipeline_logger,
+        )
 
-        # ========================================
-        # RECIPE-BASED AGENT
-        # ========================================
-        recipe_result = None
-        if initial_errors:  # Check the local variable, not request.initial_errors!
-            logger.info(f"[RecipeAgent] Attempting recipe-based fix for {repo_name}")
-            
-            # Log what's being passed to Recipe Agent
-            pipeline_logger.log_stage("recipe_agent_input", {
-                "pom_diff": pom_diff,
-                "migration_plan": migration_plan,
-                "commit_sha": commit_hash,
-                "repo_slug": repo_name,
-            })
-            
-            # Save recipe agent input as text files
-            recipe_input_dir = pipeline_logger.log_dir / "recipe_agent_input"
-            recipe_input_dir.mkdir(exist_ok=True)
-            if pom_diff:
-                (recipe_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
-            if migration_plan:
-                (recipe_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
-            logger.info(f"[RecipeAgent] Input logged at {recipe_input_dir}")
-            
-            try:
-                from app.recipe_agent.recipe_orchestrator import RecipeOrchestrator
-
-                orchestrator = RecipeOrchestrator(settings.GROQ_API_KEY, pipeline_logger=pipeline_logger)
-                recipe_result = orchestrator.process_breaking_change(
-                    repo_path=str(repo_path),
-                    pom_diff=pom_diff,
-                    migration_plan=migration_plan,  # Pass the planning agent's output
-                    commit_sha=commit_hash,
-                    repo_slug=repo_name,
-                )
-                
-                if recipe_result and recipe_result.get("success"):
-                    logger.info(f"[RecipeAgent] Successfully fixed using recipes for {repo_name}")
-                    pipeline_logger.log_final_result(True, recipe_result)
-                    pipeline_logger.finalize()
-                    return {
-                        "success": True,
-                        "repository": repo_name,
-                        "commit": commit_hash,
-                        "method": "recipe_agent",
-                        "recipes_applied": recipe_result.get("recipes_applied", []),
-                        "result": recipe_result
-                    }
-                else:
-                    logger.info(f"[RecipeAgent] Recipe fix not applicable, falling back to LLM agent")
-            except Exception as e:
-                logger.warning(f"[RecipeAgent] Recipe agent failed: {e}, falling back to LLM agent")
-        
-        # ========================================
-        # LLM AGENT (fallback or primary if no errors)
-        # ========================================
-        # Initialize the agent service with configured provider
-        agent_service = JavaMigrationAgentService()
-
-        # Log what's being passed to LLM Agent
-        pipeline_logger.log_stage("llm_agent_input", {
-            "pom_diff": pom_diff,
-            "migration_plan": migration_plan,
-            "commit_hash": commit_hash,
-            "repo_slug": repo_name,
-        })
-        
-        # Save LLM agent input as text files
-        llm_input_dir = pipeline_logger.log_dir / "llm_agent_input"
-        llm_input_dir.mkdir(exist_ok=True)
-        if pom_diff:
-            (llm_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
-        if migration_plan:
-            (llm_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
-        logger.info(f"[LLM Agent] Input logged at {llm_input_dir}")
-
-        # Process the repository
-        logger.info(f"Starting agent processing for {repo_name}")
-        result = agent_service.process_repository(
-            repo_path=str(repo_path),
+        # 4b. Planning
+        migration_plan = _create_migration_plan(
+            repo_path=repo_path,
             commit_hash=commit_hash,
             repo_slug=repo_name,
             pom_diff=pom_diff,
-            migration_plan=migration_plan,  # Pass the planning agent's output
+            initial_errors=initial_errors,
+            api_changes_text=api_changes_text,
             pipeline_logger=pipeline_logger,
         )
-        
-        # Finalize pipeline logger after LLM agent completes
-        pipeline_logger.log_final_result(result.get("success", False), result)
+
+        # 4c. Recipe Execution
+        if initial_errors and False:
+            recipe_result = _apply_recipe_agent(
+                repo_path=repo_path,
+                pom_diff=pom_diff,
+                migration_plan=migration_plan,
+                commit_hash=commit_hash,
+                repo_name=repo_name,
+                pipeline_logger=pipeline_logger,
+            )
+            
+            if recipe_result:
+                pipeline_logger.log_final_result(True, recipe_result)
+                pipeline_logger.finalize()
+                return {
+                    "success": True,
+                    "repository": repo_name,
+                    "commit": commit_hash,
+                    "method": RECIPE_AGENT_METHOD,
+                    "recipes_applied": recipe_result.get("recipes_applied", []),
+                    "result": recipe_result
+                }
+
+        # 4d. LLM Fallback / Primary Engine
+        llm_result = _apply_llm_agent(
+            repo_path=repo_path,
+            pom_diff=pom_diff,
+            migration_plan=migration_plan,
+            commit_hash=commit_hash,
+            repo_name=repo_name,
+            pipeline_logger=pipeline_logger,
+        )
+
+        pipeline_logger.log_final_result(llm_result.get("success", False), llm_result)
         pipeline_logger.finalize()
         
         return {
-            "success": result.get("success", False),
+            "success": llm_result.get("success", False),
             "repository": repo_name,
             "commit": commit_hash,
-            "method": "llm_agent",
-            "result": result
+            "method": LLM_AGENT_METHOD,
+            "result": llm_result
         }
-    
+
     except Exception as e:
         logger.error(f"Error processing repository {repo_name}: {e}")
         try:
-            pipeline_logger.log_error("process_error", str(e), __import__('traceback').format_exc())
+            pipeline_logger.log_error("process_error", str(e), traceback.format_exc())
             pipeline_logger.finalize()
-        except:
-            pass  # If logging also failed, don't raise another exception
-        raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            pass  # Suppress secondary logging errors to ensure primary exception surfaces
+            
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 @router.get("/info/{repo_name}")
-async def get_repository_info(repo_name: str):
+async def get_repository_info(repo_name: str) -> dict[str, Any]:
     """
-    Get detailed information about a local repository
-    
-    Path parameter:
-    - repo_name: Name of the repository directory
+    Get detailed Git and path information about a local repository.
+
+    Args:
+        repo_name: Name of the repository directory.
+
+    Returns:
+        A dictionary containing path, pom, and Git metadata.
+
+    Raises:
+        HTTPException: If not in LOCAL_MODE (400) or repo is not found (404).
     """
-    if not settings.LOCAL_MODE:
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only available in LOCAL_MODE"
-        )
+    _require_local_mode()
     
     repo_path = local_repo_service.get_repository_path(repo_name)
     if not repo_path:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Repository '{repo_name}' not found"
         )
     
