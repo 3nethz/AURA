@@ -4,10 +4,8 @@ Coordinates the recipe-based repair workflow.
 Runs BEFORE the existing repair agent and decides whether to use recipes or fall back.
 """
 
-import os
-import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any
 import git
 
 from app.config.config import settings

@@ -5,10 +5,9 @@ GitHub OAuth login and token management
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from app.config.config import settings
-import requests
 from app.utilities.auth.jwt import create_access_token, get_current_user
 from app.utilities.auth.github_oauth import GitHubOAuth
-from app.state.models.user import User, UserInDB
+from app.state.models.user import User
 from app.memory.user_repository import user_repo
 
 

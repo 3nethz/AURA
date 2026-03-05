@@ -1,7 +1,6 @@
 """
 Agent Callback - Updates database with agent progress
 """
-import asyncio
 from typing import Optional, Dict
 from app.memory.change_repository import change_repo
 from app.utilities.logger import logger

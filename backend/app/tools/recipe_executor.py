@@ -7,12 +7,11 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional
+from typing import Tuple
 from contextlib import contextmanager
 
 from app.utilities.logger import logger
-from app.tools.agents.DockerAgent import DockerAgent, DockerError
-
+from app.tools.agents.DockerAgent import DockerAgent
 
 class RecipeExecutor:
     """

@@ -1,15 +1,10 @@
-from fastapi import FastAPI, Header
-from pydantic import BaseModel
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.memory.mongodb import connect_db, close_db
-from typing import Optional, List, Dict, Any
 from app.nodes.routes import webhook, auth, repositories, users, changes, local_repos
 from app.config.config import settings
 
-
 app = FastAPI()
-
-
 
 # CORS for frontend
 app.add_middleware(

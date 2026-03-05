@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.chains.planning_service import PlanningAgentService
 from app.nodes.service import JavaMigrationAgentService
@@ -614,7 +614,7 @@ async def process_repository(
         )
 
         # 4c. Recipe Execution
-        if initial_errors and False:
+        if initial_errors:
             recipe_result = _apply_recipe_agent(
                 repo_path=repo_path,
                 pom_diff=pom_diff,

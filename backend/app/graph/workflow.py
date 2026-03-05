@@ -8,16 +8,12 @@ import os
 import random
 import string
 from typing import Literal
-from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 from langchain_core.messages.tool import ToolCall
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import Annotated, TypedDict
-from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_groq import ChatGroq
-
 
 
 # Copy your system_prompt from langchain-agent.py line 711
@@ -85,9 +81,6 @@ class MessagesState(TypedDict):
     """State for the agent workflow"""
     messages: Annotated[list, add_messages]
     proposed_diff: str | None  # Store the diff that was validated
-
-
-from langchain_groq import ChatGroq
 
 def build_workflow(llm, tools, output_path: str, pipeline_logger=None):
     """Build the LangGraph workflow"""

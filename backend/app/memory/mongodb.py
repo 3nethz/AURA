@@ -11,7 +11,6 @@ MongoDB connection manager
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.config.config import settings
 
-
 class MongoDB:
     client : AsyncIOMotorClient = None
 

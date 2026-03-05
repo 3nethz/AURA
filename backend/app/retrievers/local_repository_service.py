@@ -4,7 +4,6 @@ Handles local file system operations for repositories
 Used when running in LOCAL_MODE
 """
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List

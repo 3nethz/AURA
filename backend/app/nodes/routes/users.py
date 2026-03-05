@@ -7,9 +7,7 @@ User management endpoints
 # - Get user activity
 
 
-from fastapi import APIRouter, HTTPException, Depends
-from app.utilities.logger import logger
-from app.retrievers.github_service import github_service
+from fastapi import APIRouter, Depends
 from app.state.models.user import UserInDB
 from app.utilities.auth.jwt import get_current_user
 

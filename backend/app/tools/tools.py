@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from typing import Dict, Optional, TypedDict, List
 from langchain.agents import tool
@@ -9,20 +8,16 @@ from app.tools.agents.MavenReproducerAgent import MavenReproducerAgent
 from app.tools.agents.TreeAgent import get_directory_tree
 from app.tools.agents.aider.AdvancedDiffAgent import UnifiedDiffCoder
 from app.utilities.dataset.find_compilation_errors import find_compilation_errors
-from langchain_core.messages import BaseMessage
 
 from tenacity import (
     retry,
     stop_after_attempt,
-    wait_exponential,
     retry_if_exception_type,
     wait_random_exponential,
 )
 from collections import defaultdict
 from opentelemetry import trace as trace_api
 import re
-import xml.etree.ElementTree as ET
-
 
 class ToolHistory(TypedDict):
     input: str

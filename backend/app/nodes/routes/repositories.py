@@ -5,7 +5,6 @@ View repos, changes, and trigger repairs
 from fastapi import APIRouter, HTTPException, Depends
 from app.memory.repo_repository import repository_repo, change_repo
 from app.utilities.logger import logger
-from app.retrievers.github_service import github_service
 from app.state.models.user import UserInDB
 from app.utilities.auth.jwt import get_current_user
 

@@ -5,7 +5,7 @@ from typing import Optional, List, Dict
 from datetime import datetime
 from bson import ObjectId
 from app.memory.mongodb import get_database
-from app.state.models.change import Change, ChangeInDB, FixStatus
+from app.state.models.change import Change, ChangeInDB
 
 class ChangeRepository:
     """Handles all change database operations"""
