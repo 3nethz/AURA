@@ -58,24 +58,20 @@ class RecipeOrchestrator:
         self,
         repo_path: str,
         pom_diff: str,
-        compilation_errors: str,
-        commit_sha: str,
-        repo_slug: str,
-        api_changes: str = "",
-        api_changes_raw: str = ""
+        migration_plan: str = "",
+        commit_sha: str = "",
+        repo_slug: str = "",
     ) -> Dict[str, Any]:
         """
         Attempt to fix breaking changes using OpenRewrite recipes.
-        
+
         Args:
             repo_path: Path to the cloned repository
             pom_diff: Git diff of pom.xml changes
-            compilation_errors: Maven compilation errors
+            migration_plan: Plan produced by the planning agent
             commit_sha: Current commit hash
             repo_slug: Repository slug (owner/repo)
-            api_changes: Filtered API changes from REVAPI/JApiCmp
-            api_changes_raw: Full/raw API changes from REVAPI/JApiCmp (for logging)
-            
+
         Returns:
             Dict with:
                 - success: bool - whether the fix was successful
@@ -85,33 +81,22 @@ class RecipeOrchestrator:
                 - message: str - status message
         """
         logger.info(f"[RecipeOrchestrator] Starting recipe-based analysis for {repo_slug}")
-        
-        # Log full/raw API changes early if provided
-        if api_changes_raw:
-            logger.info(f"[RecipeOrchestrator] Full REVAPI output received ({len(api_changes_raw)} chars)")
-            if self.pipeline_logger:
-                self.pipeline_logger.log_stage("api_changes_raw", {
-                    "api_changes_length": len(api_changes_raw),
-                    "api_changes_preview": api_changes_raw[:500],
-                    "timestamp": __import__('datetime').datetime.now().isoformat()
-                })
-        
+
         project_path = Path(repo_path)
-        
+
         # Read pom.xml content for context
         pom_path = project_path / "pom.xml"
         pom_content = ""
         if pom_path.exists():
             with open(pom_path, 'r', encoding='utf-8') as f:
                 pom_content = f.read()
-        
-        # Step 1: Analyze the breaking change with LLM
+
+        # Step 1: Analyze the breaking change with LLM using migration plan
         logger.info("[RecipeOrchestrator] Analyzing breaking change with LLM...")
         analysis = self.recipe_service.analyze_breaking_change(
             pom_diff=pom_diff,
-            compilation_errors=compilation_errors,
+            migration_plan=migration_plan,
             pom_content=pom_content,
-            api_changes=api_changes
         )
         
         # Log the analysis result

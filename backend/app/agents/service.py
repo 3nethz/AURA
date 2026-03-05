@@ -61,34 +61,30 @@ class JavaMigrationAgentService:
         commit_hash: str,
         repo_slug: str,
         pom_diff: str,
-        initial_errors: str = "",
-        api_changes_text: str = "",
-        pipeline_logger = None,
         migration_plan: str = "",
+        pipeline_logger = None,
     ):
         """
         Run the agent on a repository to fix Java dependency issues
-        
+
         Args:
             repo_path: Path to cloned repository
             commit_hash: Git commit hash
             repo_slug: Repository identifier (owner/repo)
             pom_diff: The pom.xml changes that caused issues
-            initial_errors: Compilation errors from Maven (if available)
-            api_changes_text: API changes from REVAPI/JApiCmp
+            migration_plan: Plan produced by the planning agent (primary context)
             pipeline_logger: Optional existing PipelineLogger instance
-            migration_plan: Plan produced by the planning agent
-        
+
         Returns:
             dict with 'success', 'diff', 'solution' or 'error'
         """
-        
+
         # Initialize pipeline logger if not provided
         if pipeline_logger is None:
             from app.utils.pipeline_logger import PipelineLogger
             pipeline_logger = PipelineLogger(repo_slug)
-        
-        pipeline_logger.log_input(pom_diff, initial_errors, repo_path, commit_hash, api_changes_text)
+
+        pipeline_logger.log_input(pom_diff, "", repo_path, commit_hash, "")
         
         output_path = tempfile.mkdtemp(prefix="agent_out_")
         
@@ -99,12 +95,13 @@ class JavaMigrationAgentService:
                 repo_slug=repo_slug,
                 commit_hash=commit_hash
             )
-            
-            # PRE-READ ERROR FILES AND INCLUDE IN PROMPT
+
+            # PRE-READ ERROR FILES from migration plan
             import re
-            error_file_matches = re.findall(r'(src/main/java/[\w/]+\.java)', initial_errors)
+            # Extract file paths from migration plan (looks for "Affected Files" section)
+            error_file_matches = re.findall(r'(src/main/java/[\w/]+\.java)', migration_plan)
             unique_files = list(set(error_file_matches))
-            
+
             file_contents = {}
             for file_path in unique_files:
                 try:
@@ -115,13 +112,13 @@ class JavaMigrationAgentService:
                         print(f"[DEBUG] Pre-read file: {file_path} ({len(file_contents[file_path])} chars)")
                 except Exception as e:
                     print(f"[WARN] Could not pre-read {file_path}: {e}")
-            
+
             # Build workflow
             pipeline_logger.log_stage("build_workflow", {"output_path": output_path, "tools_count": len(tools)})
             app = build_workflow(self.llm, tools, output_path, pipeline_logger)
-            
+
             # Create prompt for the agent WITH FILE CONTENT
-            prompt = self._create_prompt(pom_diff, initial_errors, file_contents, api_changes_text, migration_plan)
+            prompt = self._create_prompt(pom_diff, "", file_contents, "", migration_plan)
             pipeline_logger.log_prompt(prompt, file_contents)
             
             # Run agent with reduced recursion limit to save tokens
@@ -188,21 +185,13 @@ class JavaMigrationAgentService:
             
             return final_result
     
-    def _create_prompt(self, pom_diff: str, initial_errors: str, file_contents: dict = None, api_changes_text: str = "", migration_plan: str = "") -> str:
+    def _create_prompt(self, pom_diff: str, file_contents: dict = None, migration_plan: str = "") -> str:
         """Create the prompt for the agent with actual file content"""
         prompt = f"""You are a Java dependency migration expert. A pom.xml file has been updated with new dependencies, causing compilation errors.
 
 POM.XML CHANGES:
 ```diff
 {pom_diff}
-```
-"""
-
-        if api_changes_text:
-            prompt += f"""
-API CHANGES (FROM DEPENDENCY DIFF TOOL):
-```
-{api_changes_text}
 ```
 """
 
@@ -213,15 +202,7 @@ MIGRATION PLAN (from planning agent — follow this plan closely):
 {migration_plan}
 ```
 """
-        
-        if initial_errors:
-            prompt += f"""
-COMPILATION ERRORS:
-```
-{initial_errors}
-```
-"""
-        
+
         # Include actual file content so agent doesn't have to guess
         if file_contents:
             prompt += "\n\n" + "="*80 + "\n"
@@ -232,12 +213,12 @@ COMPILATION ERRORS:
             prompt += "\n" + "="*80 + "\n"
             prompt += "⚠️  Your diff MUST match the EXACT lines shown above (including whitespace, blank lines, etc.)\n"
             prompt += "="*80 + "\n\n"
-        
+
         prompt += """
 YOUR TASK:
 1. Analyze the dependency changes in pom.xml
-2. Look at the ACTUAL file content provided above
-3. Identify what API changes occurred between the old and new versions
+2. Review the MIGRATION PLAN for guidance on what needs to be fixed
+3. Look at the ACTUAL file content provided above
 4. Generate a diff that matches the EXACT lines from the actual file content
 5. Fix the Java source code to work with the new dependencies
 6. Validate your changes compile successfully
@@ -259,5 +240,5 @@ Use the provided tools to:
 
 Provide unified diff format changes to fix the Java source code AND/OR add new dependencies to pom.xml if needed.
 """
-        
+
         return prompt

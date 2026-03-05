@@ -43,19 +43,17 @@ class RecipeAgentService:
     def analyze_breaking_change(
         self,
         pom_diff: str,
-        compilation_errors: str,
+        migration_plan: str = "",
         pom_content: str = "",
-        api_changes: str = ""
     ) -> Dict[str, Any]:
         """
         Analyze the breaking change and determine if OpenRewrite recipes can fix it.
-        
+
         Args:
             pom_diff: The git diff of pom.xml showing dependency changes
-            compilation_errors: Maven compilation errors
+            migration_plan: Plan produced by the planning agent
             pom_content: Full pom.xml content for context
-            api_changes: Filtered API changes from REVAPI/JApiCmp
-            
+
         Returns:
             Dict with:
                 - can_use_recipes: bool - whether recipes can handle this
@@ -63,9 +61,9 @@ class RecipeAgentService:
                 - recipe_name: str - name for the custom recipe
                 - reasoning: str - explanation of the decision
         """
-        
+
         recipes_context = self._format_recipes_for_prompt()
-        
+
         system_prompt = SystemMessage(content="""You are an expert Java dependency migration specialist.
 Your task is to analyze breaking changes from dependency version upgrades and determine if OpenRewrite recipes can fix them.
 
@@ -94,13 +92,13 @@ These recipes modify Java source files. Note: They may not work on broken projec
 2. **Version strings must be EXACT** - Maven Central requires exact versions:
    - ✅ "1.16.1" (exists)
    - ❌ "1.16" (may not exist!)
-   
+
 3. **Common correct versions**:
 
    - commons-io:commons-io → 2.15.1 or 2.11.0
    - org.apache.commons:commons-lang3 → 3.14.0
    - com.google.guava:guava → 32.1.3-jre
-   
+
 4. **For AddDependency**: Do NOT use 'onlyIfUsing' parameter
 5. **Multiple recipes**: You can select multiple recipes if needed to fix the issue
 
@@ -111,7 +109,7 @@ Respond ONLY with valid JSON:
     "can_use_recipes": true/false,
     "reasoning": "Detailed explanation of the root cause and fix strategy",
     "recipe_name": "com.aura.fix.DescriptiveName",
-    "recipe_display_name": "Fix XYZ Breaking Changes", 
+    "recipe_display_name": "Fix XYZ Breaking Changes",
     "recipe_description": "Description of what this recipe does",
     "selected_recipes": [
         {
@@ -140,14 +138,9 @@ If recipes CANNOT fix the issue (e.g., requires complex logic changes), return:
 {pom_diff}
 ```
 
-## COMPILATION ERRORS:
+## MIGRATION PLAN (from Planning Agent - follow this plan):
 ```
-{compilation_errors}
-```
-
-## API CHANGES (REVAPI/JApiCmp Analysis):
-```
-{api_changes if api_changes else "Not provided"}
+{migration_plan if migration_plan else "Not provided"}
 ```
 
 ## CURRENT POM.XML CONTENT:

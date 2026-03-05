@@ -328,27 +328,38 @@ async def process_repository(
         # ========================================
         # PLANNING AGENT (runs first, creates migration plan)
         # ========================================
-        # migration_plan = ""
-        # if initial_errors:
-        #     logger.info(f"[PlanningAgent] Generating migration plan for {repo_name}")
-        #     try:
-        #         planning_service = PlanningAgentService()
-        #         plan_result = planning_service.create_plan(
-        #             repo_path=str(repo_path),
-        #             commit_hash=commit_hash,
-        #             repo_slug=repo_name,
-        #             pom_diff=pom_diff,
-        #             initial_errors=initial_errors,
-        #             api_changes_text=api_changes_text,
-        #             pipeline_logger=pipeline_logger,
-        #         )
-        #         if plan_result and plan_result.get("success"):
-        #             migration_plan = plan_result["plan"]
-        #             logger.info(f"[PlanningAgent] Migration plan ready ({len(migration_plan)} chars)")
-        #         else:
-        #             logger.warning(f"[PlanningAgent] Planning failed: {plan_result.get('error')}, continuing without plan")
-        #     except Exception as e:
-        #         logger.warning(f"[PlanningAgent] Planning agent error: {e}, continuing without plan")
+        migration_plan = ""
+        if initial_errors:
+            logger.info(f"[PlanningAgent] Generating migration plan for {repo_name}")
+            try:
+                planning_service = PlanningAgentService()
+                plan_result = planning_service.create_plan(
+                    repo_path=str(repo_path),
+                    commit_hash=commit_hash,
+                    repo_slug=repo_name,
+                    pom_diff=pom_diff,
+                    initial_errors=initial_errors,
+                    api_changes_text=api_changes_text,
+                    pipeline_logger=pipeline_logger,
+                )
+                if plan_result and plan_result.get("success"):
+                    migration_plan = plan_result["plan"]
+                    logger.info(f"[PlanningAgent] Migration plan ready ({len(migration_plan)} chars)")
+                    
+                    # Log the migration plan explicitly
+                    pipeline_logger.log_stage("planning_agent_output", {
+                        "migration_plan": migration_plan,
+                        "plan_length": len(migration_plan),
+                    })
+                    
+                    # Save migration plan as text file for easy reading
+                    plan_text_path = pipeline_logger.log_dir / "01_migration_plan.txt"
+                    plan_text_path.write_text(migration_plan, encoding="utf-8")
+                    logger.info(f"[PlanningAgent] Migration plan saved to {plan_text_path}")
+                else:
+                    logger.warning(f"[PlanningAgent] Planning failed: {plan_result.get('error')}, continuing without plan")
+            except Exception as e:
+                logger.warning(f"[PlanningAgent] Planning agent error: {e}, continuing without plan")
 
         # ========================================
         # RECIPE-BASED AGENT
@@ -356,18 +367,34 @@ async def process_repository(
         recipe_result = None
         if initial_errors:  # Check the local variable, not request.initial_errors!
             logger.info(f"[RecipeAgent] Attempting recipe-based fix for {repo_name}")
+            
+            # Log what's being passed to Recipe Agent
+            pipeline_logger.log_stage("recipe_agent_input", {
+                "pom_diff": pom_diff,
+                "migration_plan": migration_plan,
+                "commit_sha": commit_hash,
+                "repo_slug": repo_name,
+            })
+            
+            # Save recipe agent input as text files
+            recipe_input_dir = pipeline_logger.log_dir / "recipe_agent_input"
+            recipe_input_dir.mkdir(exist_ok=True)
+            if pom_diff:
+                (recipe_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
+            if migration_plan:
+                (recipe_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
+            logger.info(f"[RecipeAgent] Input logged at {recipe_input_dir}")
+            
             try:
                 from app.recipe_agent.recipe_orchestrator import RecipeOrchestrator
-                
+
                 orchestrator = RecipeOrchestrator(settings.GROQ_API_KEY, pipeline_logger=pipeline_logger)
                 recipe_result = orchestrator.process_breaking_change(
                     repo_path=str(repo_path),
                     pom_diff=pom_diff,
-                    compilation_errors=initial_errors,  # Use the local variable
+                    migration_plan=migration_plan,  # Pass the planning agent's output
                     commit_sha=commit_hash,
                     repo_slug=repo_name,
-                    api_changes=api_changes_text,  # Pass filtered API changes
-                    api_changes_raw=api_result.get("raw", "")  # Pass full/raw API changes for logging
                 )
                 
                 if recipe_result and recipe_result.get("success"):
@@ -392,18 +419,33 @@ async def process_repository(
         # ========================================
         # Initialize the agent service with configured provider
         agent_service = JavaMigrationAgentService()
-       
+
+        # Log what's being passed to LLM Agent
+        pipeline_logger.log_stage("llm_agent_input", {
+            "pom_diff": pom_diff,
+            "migration_plan": migration_plan,
+            "commit_hash": commit_hash,
+            "repo_slug": repo_name,
+        })
+        
+        # Save LLM agent input as text files
+        llm_input_dir = pipeline_logger.log_dir / "llm_agent_input"
+        llm_input_dir.mkdir(exist_ok=True)
+        if pom_diff:
+            (llm_input_dir / "pom_diff.txt").write_text(pom_diff, encoding="utf-8")
+        if migration_plan:
+            (llm_input_dir / "migration_plan.txt").write_text(migration_plan, encoding="utf-8")
+        logger.info(f"[LLM Agent] Input logged at {llm_input_dir}")
+
         # Process the repository
         logger.info(f"Starting agent processing for {repo_name}")
         result = agent_service.process_repository(
             repo_path=str(repo_path),
             commit_hash=commit_hash,
-            repo_slug=repo_name,  # Use repo_name as slug for local repos
+            repo_slug=repo_name,
             pom_diff=pom_diff,
-            initial_errors=initial_errors,  # Use the local variable
-            api_changes_text=api_changes_text,
-            pipeline_logger=pipeline_logger,  # Pass the same logger instance
-            # migration_plan=migration_plan,  # Pass the planning agent's output
+            migration_plan=migration_plan,  # Pass the planning agent's output
+            pipeline_logger=pipeline_logger,
         )
         
         # Finalize pipeline logger after LLM agent completes
