@@ -338,6 +338,10 @@ def get_tools_for_repo(repo_path: Path, repo_slug: str, commit_hash: str = "HEAD
         """Verifies that a Maven dependency version exists on Maven Central before using it.
         Call this BEFORE adding any new dependency to pom.xml to ensure the version string is valid.
         Returns the verified (possibly corrected) version string.
+        
+        Use this JSON format to call the tool:
+        {"tool": "verify_maven_dependency", "args": {"group_id": "commons-codec", "artifact_id": "commons-codec", "version": "1.15"}}
+        
         Example: verify_maven_dependency('commons-codec', 'commons-codec', '1.15') -> '1.15'
         """
         with tracer.start_as_current_span("verify_maven_dependency") as span:

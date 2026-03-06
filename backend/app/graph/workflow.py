@@ -196,7 +196,8 @@ When you have a diff ready to test, provide it ONLY as a markdown code block sta
                 # Get the tool function and invoke it directly
                 tool_func = tools_by_name.get(tool_call["name"])
                 if not tool_func:
-                    raise ValueError(f"Tool {tool_call['name']} not found")
+                    available = ", ".join(tools_by_name.keys())
+                    raise ValueError(f"Tool '{tool_call['name']}' not found. Available tools: {available}")
                 
                 # Invoke the tool with its arguments
                 result = tool_func.invoke(tool_call["args"])
