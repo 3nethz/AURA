@@ -33,6 +33,7 @@ Reverting dependency versions is NOT an acceptable solution.
 You CAN MODIFY pom.xml to ADD NEW dependencies if needed to fix compilation issues.
 For example, you may need to add missing transitive dependencies that were removed in version upgrades.
 When adding dependencies:
+- ALWAYS use the verify_maven_dependency tool to verify the version exists on Maven Central BEFORE adding it to pom.xml
 - Place new dependencies in the <dependencies> section
 - Add complete <dependency> blocks with <groupId>, <artifactId>, and <version> tags
 - Do NOT modify or remove existing dependency versions
