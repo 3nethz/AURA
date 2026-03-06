@@ -54,8 +54,13 @@ class RecipeGenerator:
         ]
         
         for recipe in recipe_list:
-            recipe_name_item = recipe.get("name", "")
-            arguments = recipe.get("arguments", {})
+            # Support both Recipe dataclass and plain dict
+            if hasattr(recipe, 'name') and hasattr(recipe, 'arguments'):
+                recipe_name_item = recipe.name
+                arguments = recipe.arguments
+            else:
+                recipe_name_item = recipe.get("name", "")
+                arguments = recipe.get("arguments", {})
             
             if arguments:
                 # Recipe with arguments

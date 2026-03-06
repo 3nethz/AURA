@@ -129,28 +129,53 @@ When you have a diff ready to test, provide it ONLY as a markdown code block sta
         # Parse JSON tool calls from content if present
         content = response.content.strip() if hasattr(response, 'content') else str(response)
         
-        # Check if it's a JSON tool request
-        if content.startswith("{") and '"tool"' in content:
+        # Check if it's a JSON tool request (JSON may be preceded by explanatory text)
+        if '"tool"' in content:
             try:
-                # Extract JSON (might have extra text after)
-                json_end = content.find("}")
-                if json_end != -1:
-                    json_str = content[:json_end+1]
-                    tool_request = json.loads(json_str)
-                    
-                    # Convert to proper tool call format
-                    tool_call = {
-                        "name": tool_request["tool"],
-                        "args": tool_request.get("args", {}),
-                        "id": "".join(random.choices(string.ascii_uppercase + string.digits, k=9))
-                    }
-                    
-                    # Create AIMessage with tool_calls
-                    if not hasattr(response, 'tool_calls'):
-                        response.tool_calls = []
-                    response.tool_calls = [tool_call]
-                    
-                    print(f"[DEBUG] Parsed tool call: {tool_request['tool']}")
+                json_start = content.find("{")
+                if json_start != -1:
+                    # Use brace-counting to find the matching closing brace,
+                    # correctly skipping braces inside string values.
+                    depth = 0
+                    in_string = False
+                    escape_next = False
+                    json_end = -1
+                    for idx, ch in enumerate(content[json_start:], json_start):
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if ch == "\\" and in_string:
+                            escape_next = True
+                            continue
+                        if ch == '"':
+                            in_string = not in_string
+                            continue
+                        if not in_string:
+                            if ch == "{":
+                                depth += 1
+                            elif ch == "}":
+                                depth -= 1
+                                if depth == 0:
+                                    json_end = idx
+                                    break
+
+                    if json_end != -1:
+                        json_str = content[json_start:json_end + 1]
+                        tool_request = json.loads(json_str)
+
+                        # Convert to proper tool call format
+                        tool_call = {
+                            "name": tool_request["tool"],
+                            "args": tool_request.get("args", {}),
+                            "id": "".join(random.choices(string.ascii_uppercase + string.digits, k=9))
+                        }
+
+                        # Attach tool_calls to the response so the router sends it to the tools node
+                        if not hasattr(response, 'tool_calls'):
+                            response.tool_calls = []
+                        response.tool_calls = [tool_call]
+
+                        print(f"[DEBUG] Parsed tool call: {tool_request['tool']}")
             except Exception as e:
                 print(f"[DEBUG] Failed to parse tool call: {e}")
         

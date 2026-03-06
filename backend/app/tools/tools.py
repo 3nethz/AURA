@@ -8,7 +8,7 @@ from app.tools.agents.MavenReproducerAgent import MavenReproducerAgent
 from app.tools.agents.TreeAgent import get_directory_tree
 from app.tools.agents.aider.AdvancedDiffAgent import UnifiedDiffCoder
 from app.utilities.dataset.find_compilation_errors import find_compilation_errors
-from backend.app.utilities.maven_tool import maven_central_tool
+from app.utilities.maven_tool import maven_central_tool
 
 from tenacity import (
     retry,
