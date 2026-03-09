@@ -90,6 +90,24 @@ class RecipeOrchestrator:
             with open(pom_path, 'r', encoding='utf-8') as f:
                 pom_content = f.read()
 
+        # Log the full context that will be sent to the recipe agent's LLM
+        if self.pipeline_logger:
+            pom_preview = pom_content[:3000] if pom_content else "Not provided"
+            recipe_llm_input = (
+                "=== RECIPE AGENT LLM INPUT ===\n"
+                "(Exact content sent to the Recipe Agent LLM for recipe selection)\n\n"
+                "## POM.XML CHANGES (Git Diff):\n"
+                f"{pom_diff}\n\n"
+                "## MIGRATION PLAN (from Planning Agent):\n"
+                f"{migration_plan or 'Not provided'}\n\n"
+                "## POM.XML CONTENT (first 3000 chars):\n"
+                f"{pom_preview}\n"
+            )
+            (self.pipeline_logger.log_dir / "recipe_agent_llm_prompt.txt").write_text(
+                recipe_llm_input, encoding="utf-8"
+            )
+            logger.info("[RecipeOrchestrator] Recipe LLM input saved to recipe_agent_llm_prompt.txt")
+
         # Step 1: Analyze the breaking change with LLM using migration plan
         logger.info("[RecipeOrchestrator] Analyzing breaking change with LLM...")
         analysis = self.recipe_service.analyze_breaking_change(
@@ -406,6 +424,10 @@ class RecipeOrchestrator:
                     return result
                 else:
                     logger.warning(f"[RecipeOrchestrator] Compilation still fails after rewrite: {compile_output[:500]}")
+
+                    # Write maven errors to docker_build_errors.txt in the root log dir
+                    if self.pipeline_logger:
+                        self.pipeline_logger.log_docker_build_errors(compile_output, compile_output)
                     
                     # Log recipe failure
                     if self.pipeline_logger:

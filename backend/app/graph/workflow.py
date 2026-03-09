@@ -305,6 +305,10 @@ When you have a diff ready to test, provide it ONLY as a markdown code block sta
                 if compilation_succeeded and test_succeeded:
                     result_content = f"Compilation and Testing successful: The diff was applied successfully and all tests passed."
                 else:
+                    # Log maven errors to disk for offline debugging
+                    if pipeline_logger and not compilation_succeeded:
+                        pipeline_logger.log_docker_build_errors(error_text, error_text)
+
                     # Format error message clearly
                     error_msg_parts = []
                     error_msg_parts.append(f"Compilation {'succeeded' if compilation_succeeded else 'FAILED'}")
