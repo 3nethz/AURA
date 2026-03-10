@@ -548,8 +548,8 @@ class RecipeOrchestrator:
                     # IMPORTANT: Revert changes after capturing diff
                     # This ensures the repository stays clean for repeated testing
                     # Similar to LLM agent pipeline pattern
-                    # self._revert_changes(project_path, commit_sha)
-                    # logger.info("[RecipeOrchestrator] Repository reverted to original state (can test again)")
+                    self._revert_changes(project_path, commit_sha)
+                    logger.info("[RecipeOrchestrator] Repository reverted to original state (can test again)")
                     
                     result = {
                         "success": True,
