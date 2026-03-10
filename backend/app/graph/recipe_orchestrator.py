@@ -5,12 +5,12 @@ Runs BEFORE the existing repair agent and decides whether to use recipes or fall
 """
 
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 import git
 
 from app.config.config import settings
 from app.utilities.logger import logger
-from app.nodes.recipe_service import RecipeAgentService
+from app.nodes.recipe_service import RecipeAgentService, Recipe
 from app.tools.recipe_generator import RecipeGenerator
 from app.tools.recipe_executor import RecipeExecutor
 from app.tools.agents.MavenReproducerAgent import MavenReproducerAgent
@@ -52,6 +52,144 @@ class RecipeOrchestrator:
         if resolved != version.strip():
             logger.info(f"[RecipeOrchestrator] Version resolved via Maven Central: {group_id}:{artifact_id}:{version} -> {resolved}")
         return resolved
+
+    def _extract_dependency_version_changes(self, pom_diff: str) -> List[Dict[str, str]]:
+        """Extract dependency version changes from a pom.xml diff."""
+        if not pom_diff:
+            return []
+
+        group_id = None
+        artifact_id = None
+        old_version = None
+        new_version = None
+        in_dependency = False
+        changes: List[Dict[str, str]] = []
+
+        for raw_line in pom_diff.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            if line[0] in {"+", "-", " "}:
+                content = line[1:].strip()
+            else:
+                content = line
+
+            if "<dependency>" in content:
+                in_dependency = True
+
+            if in_dependency:
+                if "<groupId>" in content and "</groupId>" in content:
+                    group_id = content.split("<groupId>", 1)[1].split("</groupId>", 1)[0].strip()
+
+                if "<artifactId>" in content and "</artifactId>" in content:
+                    artifact_id = content.split("<artifactId>", 1)[1].split("</artifactId>", 1)[0].strip()
+
+                if line.startswith("-") and "<version>" in content and "</version>" in content:
+                    old_version = content.split("<version>", 1)[1].split("</version>", 1)[0].strip()
+
+                if line.startswith("+") and "<version>" in content and "</version>" in content:
+                    new_version = content.split("<version>", 1)[1].split("</version>", 1)[0].strip()
+
+            if "</dependency>" in content:
+                if group_id and artifact_id and old_version and new_version:
+                    changes.append({
+                        "groupId": group_id,
+                        "artifactId": artifact_id,
+                        "oldVersion": old_version,
+                        "newVersion": new_version,
+                    })
+                group_id = None
+                artifact_id = None
+                old_version = None
+                new_version = None
+                in_dependency = False
+
+        if group_id and artifact_id and old_version and new_version:
+            changes.append({
+                "groupId": group_id,
+                "artifactId": artifact_id,
+                "oldVersion": old_version,
+                "newVersion": new_version,
+            })
+
+        return changes
+
+    def _append_dependency_upgrade_recipes(self, selected_recipes: List[Recipe], pom_diff: str) -> List[Recipe]:
+        """Append dependency upgrade recipes so Java recipe execution order is preserved."""
+        version_changes = self._extract_dependency_version_changes(pom_diff)
+        if not version_changes:
+            logger.info("[RecipeOrchestrator] No dependency version changes detected to prepend")
+            return selected_recipes
+
+        existing_upgrades = {
+            (
+                recipe.arguments.get("groupId"),
+                recipe.arguments.get("artifactId"),
+                recipe.arguments.get("newVersion"),
+            )
+            for recipe in selected_recipes
+            if recipe.name == "org.openrewrite.maven.UpgradeDependencyVersion"
+        }
+
+        appended_recipes: List[Recipe] = []
+        for change in version_changes:
+            signature = (change["groupId"], change["artifactId"], change["newVersion"])
+            if signature in existing_upgrades:
+                continue
+
+            appended_recipes.append(
+                Recipe(
+                    name="org.openrewrite.maven.UpgradeDependencyVersion",
+                    arguments={
+                        "groupId": change["groupId"],
+                        "artifactId": change["artifactId"],
+                        "newVersion": change["newVersion"],
+                    },
+                )
+            )
+
+        if appended_recipes:
+            logger.info(
+                f"[RecipeOrchestrator] Appended {len(appended_recipes)} UpgradeDependencyVersion recipe(s) for Java execution"
+            )
+
+        return selected_recipes + appended_recipes
+
+    def _restore_previous_pom(self, project_path: Path, commit_sha: str) -> bool:
+        """Restore the previous pom.xml so Java recipes can run on compilable sources."""
+        pom_path = project_path / "pom.xml"
+        if not pom_path.exists():
+            logger.error("[RecipeOrchestrator] pom.xml not found for restoration")
+            return False
+
+        try:
+            repo = git.Repo(project_path)
+            revision_candidates = []
+            if commit_sha:
+                revision_candidates.append(f"{commit_sha}~1:pom.xml")
+            revision_candidates.append("HEAD~1:pom.xml")
+
+            seen = set()
+            for revision in revision_candidates:
+                if revision in seen:
+                    continue
+                seen.add(revision)
+                try:
+                    previous_pom = repo.git.show(revision)
+                except git.GitCommandError:
+                    continue
+
+                if previous_pom.strip():
+                    pom_path.write_text(previous_pom, encoding="utf-8")
+                    logger.info(f"[RecipeOrchestrator] Restored previous pom.xml from {revision}")
+                    return True
+
+        except Exception as e:
+            logger.error(f"[RecipeOrchestrator] Error restoring previous pom.xml: {e}")
+
+        logger.error("[RecipeOrchestrator] Failed to restore previous pom.xml")
+        return False
     
     def process_breaking_change(
         self,
@@ -199,22 +337,6 @@ class RecipeOrchestrator:
                 if args["newVersion"] != old_version:
                     logger.info(f"[RecipeOrchestrator] Recipe newVersion verified: {old_version} -> {args['newVersion']}")
         
-        # Step 3: Generate rewrite.yaml and update pom.xml
-        logger.info(f"[RecipeOrchestrator] Generating rewrite.yaml with {len(selected_recipes)} recipes...")
-        logger.info(f"[RecipeOrchestrator] Selected recipes: {selected_recipes}")
-        
-        # Log recipe decision - recipes will be attempted
-        if self.pipeline_logger:
-            self.pipeline_logger.log_stage("recipe_decision", {
-                "can_use_recipes": True,
-                "recipes_selected": len(selected_recipes),
-"recipes_details": [{"name": r.name, "arguments": r.arguments} for r in selected_recipes],
-                    "recipe_name": analysis.recipe_name or "com.aura.fix.AutoGeneratedFix",
-                    "recipe_display_name": analysis.recipe_display_name or "AURA Auto-Generated Fix",
-                    "fallback_to_existing_agent": False,
-                    "decision_timestamp": __import__('datetime').datetime.now().isoformat()
-                })
-        
         recipe_name = analysis.recipe_name or "com.aura.fix.AutoGeneratedFix"
         display_name = analysis.recipe_display_name or "AURA Auto-Generated Fix"
         description = analysis.recipe_description or "Automatically generated fix for breaking changes"
@@ -240,9 +362,32 @@ class RecipeOrchestrator:
         java_recipes = [r.name for r in selected_recipes if r.name.startswith("org.openrewrite.java.")]
         if java_recipes:
             logger.warning(f"[RecipeOrchestrator] Java recipes selected: {java_recipes}")
-            logger.warning("[RecipeOrchestrator] Java recipes require compilable code - may fail on broken projects")
+            logger.info("[RecipeOrchestrator] Restoring previous pom.xml before executing Java recipes")
+            if not self._restore_previous_pom(project_path, commit_sha):
+                return {
+                    "success": False,
+                    "used_recipes": True,
+                    "should_use_existing_agent": True,
+                    "message": "Failed to restore previous pom.xml for Java recipe execution",
+                    "diff": ""
+                }
+            selected_recipes = self._append_dependency_upgrade_recipes(selected_recipes, pom_diff)
         
         logger.info(f"[RecipeOrchestrator] Maven-only recipes: {maven_only}")
+        logger.info(f"[RecipeOrchestrator] Generating rewrite.yaml with {len(selected_recipes)} recipes...")
+        logger.info(f"[RecipeOrchestrator] Selected recipes: {selected_recipes}")
+
+        # Log recipe decision - recipes will be attempted
+        if self.pipeline_logger:
+            self.pipeline_logger.log_stage("recipe_decision", {
+                "can_use_recipes": True,
+                "recipes_selected": len(selected_recipes),
+                "recipes_details": [{"name": r.name, "arguments": r.arguments} for r in selected_recipes],
+                "recipe_name": recipe_name,
+                "recipe_display_name": display_name,
+                "fallback_to_existing_agent": False,
+                "decision_timestamp": __import__('datetime').datetime.now().isoformat()
+            })
         
         generator = RecipeGenerator(project_path)
         
@@ -390,7 +535,7 @@ class RecipeOrchestrator:
                     # This removes rewrite.yaml and the plugin from pom.xml
                     # so the diff only contains the actual fix
                     generator.cleanup()
-                    self._remove_rewrite_plugin_from_pom(project_path)
+                    generator.remove_rewrite_plugin_from_pom()
                     
                     # Read the actual modified file contents
                     # These are CORRECTLY modified by OpenRewrite, so we use them directly
@@ -403,8 +548,8 @@ class RecipeOrchestrator:
                     # IMPORTANT: Revert changes after capturing diff
                     # This ensures the repository stays clean for repeated testing
                     # Similar to LLM agent pipeline pattern
-                    self._revert_changes(project_path, commit_sha)
-                    logger.info("[RecipeOrchestrator] Repository reverted to original state (can test again)")
+                    # self._revert_changes(project_path, commit_sha)
+                    # logger.info("[RecipeOrchestrator] Repository reverted to original state (can test again)")
                     
                     result = {
                         "success": True,
