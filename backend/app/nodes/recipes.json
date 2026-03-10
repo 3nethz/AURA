@@ -56,7 +56,7 @@
   },
   {
     "name": "org.openrewrite.java.ChangeType",
-    "description": "Changes the fully qualified name of a class (package or class name). Use this when a class moves packages (e.g., javax to jakarta). NOTE: Requires compilable code.",
+    "description": "Changes the fully qualified name of a class (package or class name). Use this when a class moves packages (e.g., javax to jakarta).",
     "arguments": ["oldFullyQualifiedTypeName", "newFullyQualifiedTypeName"],
     "required_arguments": ["oldFullyQualifiedTypeName", "newFullyQualifiedTypeName"],
     "example": {
@@ -66,7 +66,7 @@
   },
   {
     "name": "org.openrewrite.java.ChangePackage",
-    "description": "Changes the package of Java classes. Use when an entire package has been renamed (e.g., javax.annotation to jakarta.annotation). NOTE: Requires compilable code.",
+    "description": "Changes the package of Java classes. Use when an entire package has been renamed (e.g., javax.annotation to jakarta.annotation).",
     "arguments": ["oldPackageName", "newPackageName", "recursive"],
     "required_arguments": ["oldPackageName", "newPackageName"],
     "example": {
@@ -77,7 +77,7 @@
   },
   {
     "name": "org.openrewrite.java.ChangeMethodName",
-    "description": "Renames a method. Use this when a library deprecates a method name in favor of a new one. NOTE: Requires compilable code.",
+    "description": "Renames a method. Use this when a library deprecates a method name in favor of a new one.",
     "arguments": ["methodPattern", "newMethodName"],
     "required_arguments": ["methodPattern", "newMethodName"],
     "example": {
