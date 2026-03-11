@@ -243,7 +243,7 @@ class RecipeGenerator:
             f"{indent_unit}<artifactId>rewrite-maven-plugin</artifactId>",
             f"{indent_unit}<version>{self.REWRITE_MAVEN_PLUGIN_VERSION}</version>",
             f"{indent_unit}<configuration>",
-            f"{indent_unit * 2}<configLocation>${{project.basedir}}/rewrite.yaml</configLocation>",
+            f"{indent_unit * 2}<configLocation>${{maven.multiModuleProjectDirectory}}/rewrite.yaml</configLocation>",
         ]
 
         if maven_only_recipes:
@@ -459,7 +459,7 @@ class RecipeGenerator:
         configuration = elem("configuration")
         
         # Point to the rewrite.yaml file
-        config_location = elem("configLocation", "${project.basedir}/rewrite.yaml")
+        config_location = elem("configLocation", "${maven.multiModuleProjectDirectory}/rewrite.yaml")
         configuration.append(config_location)
         
         # For Maven-only recipes (AddDependency, UpgradeDependency, etc.)

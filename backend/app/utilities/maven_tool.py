@@ -21,7 +21,7 @@ class MavenCentralTool:
     SEARCH_URL = "https://search.maven.org/solrsearch/select"
     REQUEST_TIMEOUT = 10  # seconds
 
-    def resolve_correct_version(self, group_id: str, artifact_id: str, version: str) -> str:
+    def resolve_correct_version(self, group_id: str, artifact_id: str, version: str) -> Optional[str]:
         """
         Resolve a correct, existing version for a Maven artifact.
         
@@ -37,10 +37,17 @@ class MavenCentralTool:
             
         Returns:
             A verified version string that exists on Maven Central,
+            None if the artifact does not exist at all,
             or the original version as a last resort if the API is unreachable.
         """
         dep_label = f"{group_id}:{artifact_id}:{version}"
         version = version.strip()
+
+        if not self.validate_artifact_exists(group_id, artifact_id):
+            logger.error(
+                f"[MavenCentralTool] ❌ Artifact {group_id}:{artifact_id} does not exist on Maven Central"
+            )
+            return None
 
         # Strip leading 'v' prefix (e.g. "v2.1.0" -> "2.1.0")
         if version.lower().startswith('v'):
@@ -79,6 +86,20 @@ class MavenCentralTool:
     def check_version_exists(self, group_id: str, artifact_id: str, version: str) -> bool:
         """Public wrapper 	2 checks if a specific GAV coordinate exists on Maven Central."""
         return self._check_version_exists(group_id, artifact_id, version)
+
+    def validate_artifact_exists(self, group_id: str, artifact_id: str) -> bool:
+        """Check whether a Maven artifact exists on Maven Central regardless of version."""
+        group_path = group_id.replace(".", "/")
+        url = f"https://repo.maven.apache.org/maven2/{group_path}/{artifact_id}/maven-metadata.xml"
+        try:
+            response = requests.head(url, timeout=5, allow_redirects=True)
+            exists = response.status_code == 200
+            if not exists:
+                logger.warning(f"[MavenCentralTool] ❌ Artifact does not exist: {group_id}:{artifact_id}")
+            return exists
+        except requests.RequestException as e:
+            logger.warning(f"[MavenCentralTool] ⚠️ Could not verify artifact {group_id}:{artifact_id}: {e}")
+            return True
 
     def get_latest_version(self, group_id: str, artifact_id: str) -> Optional[str]:
         """Public wrapper 	2 returns the latest version of an artifact, or None."""

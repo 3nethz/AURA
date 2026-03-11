@@ -50,6 +50,15 @@ execution_details: Dict[str, ExecutionDetails] = defaultdict(
 tracer = trace_api.get_tracer(__name__)
 
 
+def verify_maven_dependency_version(group_id: str, artifact_id: str, version: str) -> tuple[Optional[str], bool]:
+    """Resolve and verify a Maven dependency version against Maven Central."""
+    resolved = maven_central_tool.resolve_correct_version(group_id, artifact_id, version)
+    if resolved is None:
+        return None, False
+    exists = maven_central_tool.check_version_exists(group_id, artifact_id, resolved)
+    return resolved, exists
+
+
 def process_error_text(error_text: str, project_path: str) -> str:
     processed_lines = [
         " ".join(
@@ -346,16 +355,18 @@ def get_tools_for_repo(repo_path: Path, repo_slug: str, commit_hash: str = "HEAD
         """
         with tracer.start_as_current_span("verify_maven_dependency") as span:
             try:
-                resolved = maven_central_tool.resolve_correct_version(group_id, artifact_id, version)
-                exists = maven_central_tool.check_version_exists(group_id, artifact_id, resolved)
-                result = (
-                    f"✅ Verified: {group_id}:{artifact_id}:{resolved} exists on Maven Central."
-                    if exists
-                    else f"⚠️ Could not fully verify {group_id}:{artifact_id}:{resolved} on Maven Central. Using best guess."
-                )
-                if resolved != version:
+                resolved, exists = verify_maven_dependency_version(group_id, artifact_id, version)
+                if resolved is None:
+                    result = f"❌ Artifact does not exist on Maven Central: {group_id}:{artifact_id}"
+                else:
+                    result = (
+                        f"✅ Verified: {group_id}:{artifact_id}:{resolved} exists on Maven Central."
+                        if exists
+                        else f"⚠️ Could not fully verify {group_id}:{artifact_id}:{resolved} on Maven Central. Using best guess."
+                    )
+                if resolved is not None and resolved != version:
                     result += f" (corrected from '{version}' to '{resolved}')"
-                span.set_attribute("resolved_version", resolved)
+                span.set_attribute("resolved_version", resolved or "")
                 log_tool_execution(
                     tool_name="verify_maven_dependency",
                     input_data=f"{group_id}:{artifact_id}:{version}",

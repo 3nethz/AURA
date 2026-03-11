@@ -5,7 +5,7 @@ Runs BEFORE the existing repair agent and decides whether to use recipes or fall
 """
 
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import git
 
 from app.config.config import settings
@@ -13,8 +13,8 @@ from app.utilities.logger import logger
 from app.nodes.recipe_service import RecipeAgentService, Recipe
 from app.tools.recipe_generator import RecipeGenerator
 from app.tools.recipe_executor import RecipeExecutor
+from app.tools.tools import verify_maven_dependency_version
 from app.tools.agents.MavenReproducerAgent import MavenReproducerAgent
-from app.utilities.maven_tool import maven_central_tool
 
 
 class RecipeOrchestrator:
@@ -37,20 +37,26 @@ class RecipeOrchestrator:
         self.groq_api_key = groq_api_key or settings.GROQ_API_KEY
         self.pipeline_logger = pipeline_logger
     
-    def _verify_version(self, version: str, group_id: str = None, artifact_id: str = None) -> str:
+    def _verify_version(self, version: str, group_id: str = None, artifact_id: str = None) -> Optional[str]:
         """
-        Verify a dependency version against Maven Central.
+        Verify a dependency version using the shared Maven verification tool logic.
         
-        Instead of guessing version formats (adding .0 etc.), this queries
-        Maven Central to confirm the version actually exists and corrects
-        it if needed.
+        This reuses the same verification flow as the verify_maven_dependency tool
+        so AddDependency recipes are validated in the pipeline without involving the LLM.
         """
         if not version or not group_id or not artifact_id:
             return version
-        
-        resolved = maven_central_tool.resolve_correct_version(group_id, artifact_id, version)
+
+        resolved, exists = verify_maven_dependency_version(group_id, artifact_id, version)
+        if resolved is None:
+            logger.error(f"[RecipeOrchestrator] Artifact does not exist on Maven Central: {group_id}:{artifact_id}")
+            return None
         if resolved != version.strip():
             logger.info(f"[RecipeOrchestrator] Version resolved via Maven Central: {group_id}:{artifact_id}:{version} -> {resolved}")
+        elif exists:
+            logger.info(f"[RecipeOrchestrator] Verified dependency version exists: {group_id}:{artifact_id}:{resolved}")
+        else:
+            logger.warning(f"[RecipeOrchestrator] Could not fully verify dependency version, using resolved value: {group_id}:{artifact_id}:{resolved}")
         return resolved
 
     def _extract_dependency_version_changes(self, pom_diff: str) -> List[Dict[str, str]]:
@@ -303,6 +309,7 @@ class RecipeOrchestrator:
             }
         
         # SAFETY & NORMALIZATION: Clean up recipe arguments
+        normalized_recipes: List[Recipe] = []
         for recipe in selected_recipes:
             recipe_name = recipe.name
             args = recipe.arguments
@@ -325,7 +332,13 @@ class RecipeOrchestrator:
                 group_id = args.get("groupId", "")
                 artifact_id = args.get("artifactId", "")
                 old_version = args["version"]
-                args["version"] = self._verify_version(old_version, group_id, artifact_id)
+                verified_version = self._verify_version(old_version, group_id, artifact_id)
+                if verified_version is None and recipe_name == "org.openrewrite.maven.AddDependency":
+                    logger.warning(
+                        f"[RecipeOrchestrator] Dropping AddDependency recipe for nonexistent artifact {group_id}:{artifact_id}"
+                    )
+                    continue
+                args["version"] = verified_version or old_version
                 if args["version"] != old_version:
                     logger.info(f"[RecipeOrchestrator] Recipe version verified: {old_version} -> {args['version']}")
 
@@ -333,9 +346,25 @@ class RecipeOrchestrator:
                 group_id = args.get("groupId", args.get("newGroupId", ""))
                 artifact_id = args.get("artifactId", args.get("newArtifactId", ""))
                 old_version = args["newVersion"]
-                args["newVersion"] = self._verify_version(old_version, group_id, artifact_id)
+                verified_version = self._verify_version(old_version, group_id, artifact_id)
+                if verified_version is not None:
+                    args["newVersion"] = verified_version
                 if args["newVersion"] != old_version:
                     logger.info(f"[RecipeOrchestrator] Recipe newVersion verified: {old_version} -> {args['newVersion']}")
+
+            normalized_recipes.append(recipe)
+
+        selected_recipes = normalized_recipes
+
+        if not selected_recipes:
+            logger.info("[RecipeOrchestrator] No valid recipes remain after dependency validation")
+            return {
+                "success": False,
+                "used_recipes": False,
+                "should_use_existing_agent": True,
+                "message": "No valid recipes remain after Maven dependency validation",
+                "diff": ""
+            }
         
         recipe_name = analysis.recipe_name or "com.aura.fix.AutoGeneratedFix"
         display_name = analysis.recipe_display_name or "AURA Auto-Generated Fix"

@@ -219,7 +219,7 @@ def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> Compilat
         maven_agent = MavenReproducerAgent(repo_path)
         with maven_agent.start_container():
             (compile_ok, _test_ok), error_text, _ = maven_agent.compile_maven(
-                diffs=[], run_tests=False, timeout=MAVEN_TIMEOUT_SEC
+                diffs=[], run_tests=True, timeout=MAVEN_TIMEOUT_SEC
             )
 
         if not compile_ok:

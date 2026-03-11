@@ -56,6 +56,21 @@ Step: [The concrete, high-level directive for the Executor]
 5. **Suggested Order**: Structure your steps in the exact, safest execution order. Fix shared utilities, interfaces, or base classes before updating the concrete implementations that depend on them.
 6. **Risk Flagging**: If a step carries runtime behavior risks beyond just fixing the compilation error, explicitly state this in the 'Reasoning' block of that step.
 
+## Repair Strategy Guidelines
+When multiple possible fixes exist, prefer the **least invasive change that restores compilation**.
+
+Follow this priority order when planning fixes:
+1. Update imports or package names if classes were relocated.
+2. Add missing dependencies that contain the relocated classes.
+3. Update method signatures or API usage if the API changed.
+4. Replace deprecated classes with recommended alternatives.
+5. Perform structural refactors (e.g., switching runners, rewriting tests, migrating frameworks) **ONLY if the previous options cannot resolve the compilation errors.**
+
+Avoid introducing new architectural patterns or test frameworks unless the original API is completely removed and no compatibility layer exists.
+
+## Consistency Requirement
+If a missing class appears to have been **relocated to another package or artifact**, prefer restoring the same class via import or dependency updates rather than replacing it with a different mechanism.
+
 IMPORTANT RULES:
 - DO NOT produce any code diffs or patches.
 - DO NOT suggest reverting dependency versions — the upgrades are intentional.
