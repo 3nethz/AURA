@@ -218,7 +218,7 @@ def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> Compilat
     try:
         maven_agent = MavenReproducerAgent(repo_path)
         with maven_agent.start_container():
-            (compile_ok, _test_ok), error_text, _ = maven_agent.compile_maven(
+            (compile_ok, test_ok), error_text, _ = maven_agent.compile_maven(
                 diffs=[], run_tests=True, timeout=MAVEN_TIMEOUT_SEC
             )
 
@@ -226,7 +226,11 @@ def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> Compilat
             logger.info(f"Compilation failed - detected errors ({len(error_text)} chars)")
             return CompilationResult(needs_fixes=True, errors=error_text)
 
-        logger.info("Project compiles successfully - no errors to fix")
+        if not test_ok:
+            logger.info(f"Tests failed - detected errors ({len(error_text)} chars)")
+            return CompilationResult(needs_fixes=True, errors=error_text)
+
+        logger.info("Project compiles and tests successfully - no errors to fix")
         return CompilationResult(needs_fixes=False, errors="")
 
     except Exception as e:
@@ -579,7 +583,7 @@ async def process_repository(
             return {
                 "success": True,
                 "repository": repo_name,
-                "message": "Project compiles successfully, no fixes needed"
+                "message": "Project compiles and tests successfully, no fixes needed"
             }
         initial_errors = comp_result.errors
 
@@ -636,26 +640,26 @@ async def process_repository(
                     "result": recipe_result
                 }
 
-        # 4d. LLM Fallback / Primary Engine
-        llm_result = _apply_llm_agent(
-            repo_path=repo_path,
-            pom_diff=pom_diff,
-            migration_plan=migration_plan,
-            commit_hash=commit_hash,
-            repo_name=repo_name,
-            pipeline_logger=pipeline_logger,
-        )
+        # # 4d. LLM Fallback / Primary Engine
+        # llm_result = _apply_llm_agent(
+        #     repo_path=repo_path,
+        #     pom_diff=pom_diff,
+        #     migration_plan=migration_plan,
+        #     commit_hash=commit_hash,
+        #     repo_name=repo_name,
+        #     pipeline_logger=pipeline_logger,
+        # )
 
-        pipeline_logger.log_final_result(llm_result.get("success", False), llm_result)
-        pipeline_logger.finalize()
+        # pipeline_logger.log_final_result(llm_result.get("success", False), llm_result)
+        # pipeline_logger.finalize()
         
-        return {
-            "success": llm_result.get("success", False),
-            "repository": repo_name,
-            "commit": commit_hash,
-            "method": LLM_AGENT_METHOD,
-            "result": llm_result
-        }
+        # return {
+        #     "success": llm_result.get("success", False),
+        #     "repository": repo_name,
+        #     "commit": commit_hash,
+        #     "method": LLM_AGENT_METHOD,
+        #     "result": llm_result
+        # }
 
     except Exception as e:
         logger.error(f"Error processing repository {repo_name}: {e}")

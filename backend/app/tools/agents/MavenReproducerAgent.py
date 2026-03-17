@@ -174,11 +174,13 @@ class MavenReproducerAgent:
                         "/mnt/repo/", ""
                     )
             else:
-                # Better isolator for test results
+                # Better isolator for compile vs test failures
                 lines = docker_output.split("\n")
                 test_index = -1
                 compilation_index = -1
                 compilation_failed = False
+                output_code_int = int(output_code)
+
                 for i, line in enumerate(lines):
                     if "[INFO] Results:" in line:
                         test_index = i
@@ -189,9 +191,47 @@ class MavenReproducerAgent:
                         compilation_index = i
                         break
 
+                if not compilation_failed:
+                    compilation_error_markers = [
+                        "Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin",
+                        "Compilation failure",
+                        "[ERROR] COMPILATION ERROR",
+                    ]
+                    for i, line in enumerate(lines):
+                        if any(marker in line for marker in compilation_error_markers):
+                            compilation_failed = True
+                            compilation_index = i
+                            break
+
                 if compilation_failed:
                     test_output = "\n".join(lines[(compilation_index - 1) :])
                     return (False, False), test_output
+
+                explicit_test_failure = (
+                    "There are test failures." in docker_output
+                    or "Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin" in docker_output
+                    or "Failed to execute goal org.apache.maven.plugins:maven-failsafe-plugin" in docker_output
+                )
+
+                if output_code_int != 0 and explicit_test_failure:
+                    if test_index == -1:
+                        lines_without_downloads = [
+                            line
+                            for line in lines
+                            if "Downloading" not in line and "Downloaded" not in line
+                        ]
+                        return (True, False), "\n".join(lines_without_downloads)
+
+                    test_output = "\n".join(lines[(test_index - 1) :])
+                    return (True, False), test_output
+
+                if output_code_int != 0:
+                    lines_without_downloads = [
+                        line
+                        for line in lines
+                        if "Downloading" not in line and "Downloaded" not in line
+                    ]
+                    return (False, False), "\n".join(lines_without_downloads)
 
                 if test_index == -1:
                     lines_without_downloads = [
@@ -199,12 +239,11 @@ class MavenReproducerAgent:
                         for line in lines
                         if "Downloading" not in line and "Downloaded" not in line
                     ]
-                    return (True, int(output_code) == 0), "\n".join(
+                    return (True, True), "\n".join(
                         lines_without_downloads
                     )
 
                 test_output = "\n".join(lines[(test_index - 1) :])
-                succeeded_both = int(output_code) == 0
-                return (True, succeeded_both), test_output
+                return (True, True), test_output
         except Exception as e:
-            return False, f"An error occurred: {str(e)}"
+            return (False, False), f"An error occurred: {str(e)}"
