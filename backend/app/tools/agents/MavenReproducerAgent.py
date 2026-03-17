@@ -12,6 +12,19 @@ from app.tools.agents.LSPAgent import extract_error_lines
 
 
 class MavenReproducerAgent:
+    INITIAL_ERROR_SCAN_FLAGS = (
+        " -Dcheckstyle.skip=true"
+        " -Dmaven.remote.resources.skip=true"
+        " -Dpmd.skip=true"
+        " -Dspotbugs.skip=true"
+        " -Dfindbugs.skip=true"
+    )
+    NORMALIZE_JAVA_LINE_ENDINGS_CMD = (
+        "if [ -d /mnt/repo/src ]; then "
+        "find /mnt/repo/src -name \"*.java\" -exec sed -i 's/\\r//' {} +; "
+        "fi"
+    )
+
     def __init__(self, project_path: Path) -> None:
 
         self.dockerAgent = DockerAgent("maven:3.9.8-amazoncorretto-17", project_path)
@@ -68,6 +81,7 @@ class MavenReproducerAgent:
         timeout: int = 1800,
         collect_all_errors: bool = False,
         errors_only: bool = False,
+        initial_error_scan: bool = False,
     ) -> Tuple[Tuple[bool, bool], str, dict]:
         with open(file_path, "w", encoding="utf-8") as out_file_wrapper:
             out_file_wrapper.write(file_content)
@@ -77,6 +91,7 @@ class MavenReproducerAgent:
             timeout,
             collect_all_errors=collect_all_errors,
             errors_only=errors_only,
+            initial_error_scan=initial_error_scan,
         )
 
         return (compile, test), error_text, {file_path: file_content}
@@ -88,6 +103,7 @@ class MavenReproducerAgent:
         timeout: int = 1800,
         collect_all_errors: bool = False,
         errors_only: bool = False,
+        initial_error_scan: bool = False,
     ) -> Tuple[Tuple[bool, bool], str, dict]:
 
         assert self.container is not None, "Container is not initialized"
@@ -120,6 +136,7 @@ class MavenReproducerAgent:
             timeout,
             collect_all_errors=collect_all_errors,
             errors_only=errors_only,
+            initial_error_scan=initial_error_scan,
         )
 
         return (compile, test), error_text, updated_files
@@ -130,6 +147,7 @@ class MavenReproducerAgent:
         timeout: int = 1800,
         collect_all_errors: bool = False,
         errors_only: bool = False,
+        initial_error_scan: bool = False,
     ) -> Tuple[Tuple[bool, bool], str]:
         try:
             reproduction_command = "mvn clean test -Dsurefire.printSummary=true -Dsurefire.redirectTestOutputToFile=false"
@@ -147,7 +165,13 @@ class MavenReproducerAgent:
                 if collect_all_errors:
                     reproduction_command += " -fn"
 
-            timeout_command = f"timeout -k 10s {timeout}s {reproduction_command}"
+            if initial_error_scan:
+                reproduction_command += self.INITIAL_ERROR_SCAN_FLAGS
+
+            wrapped_command = (
+                f"{self.NORMALIZE_JAVA_LINE_ENDINGS_CMD} && {reproduction_command}"
+            )
+            timeout_command = f"timeout -k 10s {timeout}s sh -c \"{wrapped_command}\""
 
             print(f"Running maven command {timeout_command}")
             output_code, docker_output = self.dockerAgent.execute_command(
@@ -169,6 +193,7 @@ class MavenReproducerAgent:
                     timeout,
                     collect_all_errors=collect_all_errors,
                     errors_only=errors_only,
+                    initial_error_scan=initial_error_scan,
                 )
 
             self.compiler_upgrade_attempted = False

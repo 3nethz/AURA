@@ -268,10 +268,11 @@ def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> Compilat
         with maven_agent.start_container():
             (compile_ok, test_ok), error_text, _ = maven_agent.compile_maven(
                 diffs=[],
-                run_tests=True,
+                run_tests=False,
                 timeout=MAVEN_TIMEOUT_SEC,
                 collect_all_errors=True,
                 errors_only=True,
+                initial_error_scan=True,
             )
         error_text = _sanitize_initial_errors(error_text)
 

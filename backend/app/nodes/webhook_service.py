@@ -164,6 +164,7 @@ class WebhookService:
                     timeout=300,
                     collect_all_errors=True,
                     errors_only=True,
+                    initial_error_scan=True,
                 )
             
             initial_errors = error_text if not compile_ok else ""
