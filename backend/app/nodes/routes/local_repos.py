@@ -101,6 +101,54 @@ class CompilationResult(NamedTuple):
     errors: str
 
 
+def _sanitize_initial_errors(raw_errors: str) -> str:
+    """
+    Keep only Maven error-relevant lines and remove [INFO] / noise lines.
+
+    Preserves [ERROR] lines and their indented continuation details (e.g. symbol/location).
+    """
+    if not raw_errors:
+        return ""
+
+    cleaned_lines: list[str] = []
+    previous_was_error = False
+
+    for raw_line in raw_errors.splitlines():
+        line = raw_line.rstrip("\r")
+        stripped = line.strip()
+
+        if not stripped:
+            if previous_was_error:
+                cleaned_lines.append("")
+            continue
+
+        if stripped.startswith("[INFO]"):
+            previous_was_error = False
+            continue
+
+        if stripped.startswith("[ERROR]"):
+            cleaned_lines.append(line)
+            previous_was_error = True
+            continue
+
+        if previous_was_error and (line.startswith(" ") or line.startswith("\t")):
+            cleaned_lines.append(line)
+            continue
+
+        if previous_was_error and (
+            stripped.startswith("symbol:")
+            or stripped.startswith("location:")
+            or stripped.startswith("-> [Help")
+            or stripped.startswith("For more information")
+        ):
+            cleaned_lines.append(line)
+            continue
+
+        previous_was_error = False
+
+    return "\n".join(cleaned_lines).replace("/mnt/repo/", "").strip()
+
+
 # --- Helper Functions ---
 def _require_local_mode() -> None:
     """
@@ -219,8 +267,13 @@ def _get_initial_errors_from_docker(repo_path: Path, repo_name: str) -> Compilat
         maven_agent = MavenReproducerAgent(repo_path)
         with maven_agent.start_container():
             (compile_ok, test_ok), error_text, _ = maven_agent.compile_maven(
-                diffs=[], run_tests=True, timeout=MAVEN_TIMEOUT_SEC
+                diffs=[],
+                run_tests=True,
+                timeout=MAVEN_TIMEOUT_SEC,
+                collect_all_errors=True,
+                errors_only=True,
             )
+        error_text = _sanitize_initial_errors(error_text)
 
         if not compile_ok:
             logger.info(f"Compilation failed - detected errors ({len(error_text)} chars)")
@@ -576,7 +629,7 @@ async def process_repository(
     logger.info(f"[GIT] Final result: pom_diff length = {len(pom_diff)} chars")
     
     # 2. Baseline Docker Compilation
-    initial_errors = request.initial_errors
+    initial_errors = _sanitize_initial_errors(request.initial_errors or "")
     if not initial_errors:
         comp_result = _get_initial_errors_from_docker(repo_path, repo_name)
         if not comp_result.needs_fixes:

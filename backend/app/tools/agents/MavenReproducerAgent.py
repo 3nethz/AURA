@@ -66,16 +66,28 @@ class MavenReproducerAgent:
         file_path: str,
         run_tests: bool = True,
         timeout: int = 1800,
+        collect_all_errors: bool = False,
+        errors_only: bool = False,
     ) -> Tuple[Tuple[bool, bool], str, dict]:
         with open(file_path, "w", encoding="utf-8") as out_file_wrapper:
             out_file_wrapper.write(file_content)
 
-        (compile, test), error_text = self._compile_maven(run_tests, timeout)
+        (compile, test), error_text = self._compile_maven(
+            run_tests,
+            timeout,
+            collect_all_errors=collect_all_errors,
+            errors_only=errors_only,
+        )
 
         return (compile, test), error_text, {file_path: file_content}
 
     def compile_maven(
-        self, diffs: list[str], run_tests: bool, timeout: int = 1800
+        self,
+        diffs: list[str],
+        run_tests: bool,
+        timeout: int = 1800,
+        collect_all_errors: bool = False,
+        errors_only: bool = False,
     ) -> Tuple[Tuple[bool, bool], str, dict]:
 
         assert self.container is not None, "Container is not initialized"
@@ -103,12 +115,21 @@ class MavenReproducerAgent:
         except Exception as e:
             return (False, False), f"Failed to prepare diffs: {e}", {}
 
-        (compile, test), error_text = self._compile_maven(run_tests, timeout)
+        (compile, test), error_text = self._compile_maven(
+            run_tests,
+            timeout,
+            collect_all_errors=collect_all_errors,
+            errors_only=errors_only,
+        )
 
         return (compile, test), error_text, updated_files
 
     def _compile_maven(
-        self, run_tests: bool, timeout: int = 1800
+        self,
+        run_tests: bool,
+        timeout: int = 1800,
+        collect_all_errors: bool = False,
+        errors_only: bool = False,
     ) -> Tuple[Tuple[bool, bool], str]:
         try:
             reproduction_command = "mvn clean test -Dsurefire.printSummary=true -Dsurefire.redirectTestOutputToFile=false"
@@ -118,8 +139,13 @@ class MavenReproducerAgent:
 
             reproduction_command += " -B"
 
+            if collect_all_errors:
+                reproduction_command += " -fn"
+
             if not run_tests:
                 reproduction_command = "mvn clean compile -DskipTests -B"
+                if collect_all_errors:
+                    reproduction_command += " -fn"
 
             timeout_command = f"timeout -k 10s {timeout}s {reproduction_command}"
 
@@ -138,7 +164,12 @@ class MavenReproducerAgent:
             ):
                 self.force_upgrade_compiler_version = True
                 self.compiler_upgrade_attempted = True
-                return self._compile_maven(run_tests, timeout)
+                return self._compile_maven(
+                    run_tests,
+                    timeout,
+                    collect_all_errors=collect_all_errors,
+                    errors_only=errors_only,
+                )
 
             self.compiler_upgrade_attempted = False
 
@@ -170,10 +201,22 @@ class MavenReproducerAgent:
                         "/mnt/repo/", ""
                     )
                 else:
+                    if errors_only:
+                        return (has_succeeded, has_succeeded), ""
                     return (has_succeeded, has_succeeded), docker_output.replace(
                         "/mnt/repo/", ""
                     )
             else:
+                if collect_all_errors:
+                    error_lines = extract_error_lines(docker_output)
+                    has_errors = len(error_lines) > 0
+                    if has_errors:
+                        return (False, False), "\n".join(error_lines).replace(
+                            "/mnt/repo/", ""
+                        )
+                    if errors_only:
+                        return (True, True), ""
+
                 # Better isolator for compile vs test failures
                 lines = docker_output.split("\n")
                 test_index = -1
