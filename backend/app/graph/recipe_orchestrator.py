@@ -16,6 +16,12 @@ from app.tools.recipe_executor import RecipeExecutor
 from app.tools.tools import verify_maven_dependency_version
 from app.tools.agents.MavenReproducerAgent import MavenReproducerAgent
 
+RECIPE_MODULE_REQUIREMENTS = {
+                "org.openrewrite.java.migrate.ChangeMethodInvocationReturnType": 
+                    "org.openrewrite.recipe:rewrite-migrate-java:3.22.0",
+                "org.openrewrite.java.spring.ChangeMethodParameter": 
+                    "org.openrewrite.recipe:rewrite-spring:6.24.1",
+}
 
 class RecipeOrchestrator:
     """

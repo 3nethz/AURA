@@ -5,9 +5,9 @@
     "arguments": ["groupId", "artifactId", "version", "scope", "type", "classifier"],
     "required_arguments": ["groupId", "artifactId", "version"],
     "example": {
-      "groupId": "org.apache.commons",
-      "artifactId": "org.apache.commons",
-      "version": "3.13.0"
+      "groupId": "com.google.guava",
+      "artifactId": "guava",
+      "version": "29.X"
     }
   },
   {
@@ -34,26 +34,7 @@
       "version": "3.11.0"
     }
   },
-  {
-    "name": "org.openrewrite.maven.ChangePropertyValue",
-    "description": "Changes the value of a Maven property in pom.xml. Use when you need to update version properties or other configuration values.",
-    "arguments": ["key", "newValue", "addIfMissing"],
-    "required_arguments": ["key", "newValue"],
-    "example": {
-      "key": "java.version",
-      "newValue": "17"
-    }
-  },
-  {
-    "name": "org.openrewrite.maven.AddProperty",
-    "description": "Adds a new property to the pom.xml properties section.",
-    "arguments": ["key", "value"],
-    "required_arguments": ["key", "value"],
-    "example": {
-      "key": "maven.compiler.source",
-      "value": "17"
-    }
-  },
+
   {
     "name": "org.openrewrite.java.ChangeType",
     "description": "Changes the fully qualified name of a class (package or class name). Use this when a class moves packages (e.g., javax to jakarta).",
@@ -77,12 +58,95 @@
   },
   {
     "name": "org.openrewrite.java.ChangeMethodName",
-    "description": "Renames a method. Use this when a library deprecates a method name in favor of a new one.",
-    "arguments": ["methodPattern", "newMethodName"],
+    "description": "Renames a method call at all call sites. Use when a library renames a method between versions.",
+    "arguments": ["methodPattern", "newMethodName", "matchOverrides"],
     "required_arguments": ["methodPattern", "newMethodName"],
     "example": {
       "methodPattern": "com.example.MyClass oldMethod(..)",
-      "newMethodName": "newMethod"
+      "newMethodName": "newMethod",
+      "matchOverrides": true
+    }
+  },
+  {
+    "name": "org.openrewrite.java.ChangeMethodTargetToStatic",
+    "description": "Changes an instance method call to a static method call on a target class. Use when a method moves from an instance method to a static utility method.",
+    "arguments": ["methodPattern", "fullyQualifiedTargetTypeName", "returnType", "matchOverrides"],
+    "required_arguments": ["methodPattern", "fullyQualifiedTargetTypeName"],
+    "example": {
+      "methodPattern": "com.example.MyClass instanceMethod(..)",
+      "fullyQualifiedTargetTypeName": "com.example.MyUtils",
+      "returnType": "java.lang.String"
+    }
+  },
+  {
+    "name": "org.openrewrite.java.ChangeMethodTargetToVariable",
+    "description": "Changes a static method call to an instance method call on a variable. Use when a method moves from static to instance.",
+    "arguments": ["methodPattern", "variableName", "variableType", "matchOverrides"],
+    "required_arguments": ["methodPattern", "variableName", "variableType"],
+    "example": {
+      "methodPattern": "com.example.MyUtils staticMethod(com.example.MyClass, ..)",
+      "variableName": "myInstance",
+      "variableType": "com.example.MyClass"
+    }
+  },
+  {
+    "name": "org.openrewrite.java.ReorderMethodArguments",
+    "description": "Reorders arguments in a method call to match a new method signature. Use when a library reorders parameters between versions.",
+    "arguments": ["methodPattern", "newParameterNames", "oldParameterNames", "matchOverrides"],
+    "required_arguments": ["methodPattern", "newParameterNames", "oldParameterNames"],
+    "example": {
+      "methodPattern": "com.example.MyClass myMethod(String, int)",
+      "newParameterNames": ["count", "name"],
+      "oldParameterNames": ["name", "count"]
+    }
+  },
+  {
+    "name": "org.openrewrite.java.UseStaticImport",
+    "description": "Replaces a fully qualified static method call with a static import. Use when a static method call site breaks because the class was removed but the method moved to a statically importable location.",
+    "arguments": ["methodPattern"],
+    "required_arguments": ["methodPattern"],
+    "example": {
+      "methodPattern": "org.junit.Assert assertEquals(..)"
+    }
+  },
+  {
+    "name": "org.openrewrite.java.RemoveImplements",
+    "description": "Removes an interface from a class's implements clause. Use when an interface is deleted from a dependency and your class no longer needs to declare it.",
+    "arguments": ["interfaceType", "filter"],
+    "required_arguments": ["interfaceType"],
+    "example": {
+      "interfaceType": "com.example.OldInterface"
+    }
+  },
+  {
+    "name": "org.openrewrite.java.AddImport",
+    "description": "Adds an import statement to a Java source file. Use when a new type reference is introduced that requires an explicit import.",
+    "arguments": ["type", "staticMethod", "onlyIfReferenced"],
+    "required_arguments": ["type"],
+    "example": {
+      "type": "java.util.Optional",
+      "onlyIfReferenced": true
+    }
+  },
+  {
+    "name": "org.openrewrite.java.ChangeMethodInvocationReturnType",
+    "description": "Updates the declared type of the variable receiving a method's return value at all call sites. Use when a method's return type changes in a new dependency version. NOTE: Only fixes the variable declaration — does not fix downstream usage of the value.",
+    "arguments": ["methodPattern", "newReturnType"],
+    "required_arguments": ["methodPattern", "newReturnType"],
+    "example": {
+      "methodPattern": "com.example.MyClass getFoo()",
+      "newReturnType": "java.util.Optional"
+    }
+  },
+  {
+    "name": "org.openrewrite.java.spring.ChangeMethodParameter",
+    "description": "Changes the type of a parameter on a method declaration you own. Use when an interface or superclass from a dependency changes a parameter type and your implementation must match.",
+    "arguments": ["methodPattern", "parameterType", "parameterIndex"],
+    "required_arguments": ["methodPattern", "parameterType", "parameterIndex"],
+    "example": {
+      "methodPattern": "com.yourcode.MyService process(String)",
+      "parameterType": "java.util.Optional",
+      "parameterIndex": 0
     }
   }
 ]
